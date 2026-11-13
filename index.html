@@ -16,6 +16,19 @@
 <body>
 <main id="app"><div class="loading"><div class="spinner"></div><p>여는 중…</p></div></main>
 <noscript>이 앱은 자바스크립트가 켜져 있어야 합니다.</noscript>
+<script>
+// 앱이 10초 안에 안 열리면(새 판·옛 판 파일이 섞여 열기에 실패 등 — 11-14 점검) 고칠 단추를 보인다.
+// 단추는 저장해 둔 앱 파일만 지우고 새로 받는다. 곡·점수(IndexedDB)는 지우지 않는다.
+setTimeout(function () {
+  if (window.__noraeStarted) return;
+  var a = document.getElementById('app');
+  a.innerHTML = '<div class="loading"><p>앱이 열리지 않습니다.</p><p class="hint">인터넷이 되는 곳에서 아래 단추를 누르세요. 곡은 지워지지 않습니다.</p><button class="primary" id="fix-app">새로 받아 다시 열기</button></div>';
+  document.getElementById('fix-app').onclick = function () {
+    var done = function () { location.reload(); };
+    try { caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }).then(done, done); } catch (e) { done(); }
+  };
+}, 10000);
+</script>
 <script src="js/vendor/vexflow-bravura.js"></script>
 <script type="module" src="js/main.js"></script>
 </body>

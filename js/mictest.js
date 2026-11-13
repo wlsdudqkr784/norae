@@ -1,7 +1,7 @@
 // 마이크 시험 (11-13) — 노래 없이 소리를 내면 앱이 듣는 음 이름·소리 크기·지난 6초 음높이를 바로 보여 준다.
 // 부르기 화면과 같은 길(getMic · PitchDetector · 설정의 감도)로 들어서, 여기서 맞게 잡히면 부르기에서도 잡힌다.
 // 함께 보이는 것: 쓰는 마이크 이름과 표본 빠르기(Hz) — 블루투스 통화 방식이면 8000·16000 처럼 낮게 나온다.
-import { PitchDetector, freqToMidi } from './pitch.js';
+import { PitchDetector, freqToMidi, VOICES } from './pitch.js';
 import { settings, el, audioCtx } from './util.js';
 import { getMic, releaseMic } from './game.js';
 
@@ -34,7 +34,9 @@ export class MicTest {
       this.an.fftSize = 2048;
       this.node.connect(this.an);
       this.buf = new Float32Array(this.an.fftSize);
-      this.det = new PitchDetector(ctx.sampleRate, this.an.fftSize);
+      const vc = VOICES[s.voice] || VOICES.both;
+      this.det = new PitchDetector(ctx.sampleRate, this.an.fftSize, vc);
+      const lowName = noteName(freqToMidi(this.det.minHz)), highName = noteName(freqToMidi(vc.max));
       const tr = this.stream.getAudioTracks()[0];
       const st = (tr && tr.getSettings) ? tr.getSettings() : {};
       const rate = st.sampleRate ? `${st.sampleRate}Hz` : '표본 빠르기 모름';
@@ -48,6 +50,7 @@ export class MicTest {
         el('div', { class: 'mt-level', 'aria-hidden': 'true' }, this.lvBar, this.gateMark),
         this.cv,
         el('p', { class: 'hint' }, `쓰는 마이크: ${(tr && tr.label) || '이름 모름'} · ${rate}`),
+        el('p', { class: 'hint' }, `목소리 기준 '${vc.name}': ${lowName}(${Math.round(this.det.minHz)}Hz) ~ ${highName} 사이만 잡습니다.`),
         el('p', { class: 'hint' }, '"아~" 하고 음을 올렸다 내려 보세요. 음 이름이 따라 바뀌면 마이크는 괜찮습니다. 막대가 세로 금(감도)을 못 넘으면 소리가 작다고 보고 무시합니다.'),
       );
       this.hist = [];

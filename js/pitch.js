@@ -1,14 +1,25 @@
 // 목소리 음높이 잡기 — YIN (de Cheveigné & Kawahara 2002) 을 짧게 구현.
-// 사람 목소리 범위(약 70~1100 Hz)만 본다.
+// 볼 범위는 목소리 기준(설정)으로 정한다.
+// 11-14: 전에는 70Hz 아래를 아예 안 봐서 남자 낮은 도(도2 = 65Hz)를 절대 못 잡았다(레2 = 73Hz 부터 잡힘).
+// 낮은 쪽 한계는 창 크기도 넘지 못한다: 지연 tau 는 반창(size/2) 안 — 2048 이면 48kHz 에서 약 47Hz 까지.
+
+// 목소리 기준: 남자는 낮게(솔1 49Hz~), 여자는 낮은 쪽을 막아 한 옥타브 아래로 잘못 잡는 일을 줄인다
+export const VOICES = {
+  // 둘 다: 63Hz 부터 — 전기 웅 소리(60Hz)는 빼고 남자 낮은 도(도2 65Hz)는 든다(11-14 점검: 50Hz 로 두면 웅 소리를 시1 로 잡음)
+  both: { name: '둘 다', min: 63, max: 1100 },
+  male: { name: '남자', min: 48, max: 800 },
+  female: { name: '여자', min: 100, max: 1300 },
+};
 
 export class PitchDetector {
-  constructor(sampleRate, size = 2048) {
+  constructor(sampleRate, size = 2048, range = VOICES.both) {
     this.sr = sampleRate;
     this.size = size;
     this.half = size >> 1;
     this.d = new Float32Array(this.half);
-    this.minTau = Math.max(2, Math.floor(sampleRate / 1100));
-    this.maxTau = Math.min(this.half - 1, Math.ceil(sampleRate / 70));
+    this.minTau = Math.max(2, Math.floor(sampleRate / range.max));
+    this.maxTau = Math.min(this.half - 1, Math.ceil(sampleRate / range.min));
+    this.minHz = sampleRate / this.maxTau;
     this.threshold = 0.15;
   }
 
@@ -46,10 +57,14 @@ export class PitchDetector {
     for (let tau = this.minTau + 1; tau < maxTau; tau++) {
       if (d[tau] < this.threshold) {
         while (tau + 1 < maxTau && d[tau + 1] < d[tau]) tau++;
+        // 골이 범위 끝까지 계속 내려가면 진짜 골은 범위 밖(웅 소리 같은 더 낮은 소리) — 끝 값을 음으로 치지 않는다(11-14)
+        if (tau + 1 >= maxTau) break;
         best = tau;
         break;
       }
     }
+    // 기준(0.15) 아래 골이 없으면 '음 없음'. (11-14 점검: 잡음 많은 방에서 가장 깊은 골을 대신 쓰면
+    // 낮은 음이 75~80% '틀린 음' 으로 나왔다 — 틀린 음은 빨갛게 칠해져 없는 것보다 나쁘다. 그래서 쓰지 않는다)
     if (best < 0) return { freq: 0, clarity: 0, rms };
     // 포물선 보간
     const a = d[best - 1], b = d[best], c = d[best + 1];

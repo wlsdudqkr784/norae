@@ -6,7 +6,11 @@ import { parseUltraStar } from './ultrastar.js';
 import { Session, releaseMic, listMics } from './game.js';
 import { TakePlayer } from './take.js';
 import { MicTest } from './mictest.js';
+import { VOICES } from './pitch.js';
+import { CALIB_TITLE, CALIB_LINES, isCalibSong } from './calib.js';
 
+// 여기까지 왔으면 모든 파일을 제대로 읽은 것 — index.html 의 '안 열림' 단추가 뜨지 않게(11-14)
+window.__noraeStarted = true;
 const app = document.getElementById('app');
 const params = new URLSearchParams(location.search);
 const TEST = params.get('test') === '1';
@@ -38,6 +42,7 @@ async function route() {
   const arg = decodeURIComponent(rest.join('/'));
   try {
     if (name === 'play' && arg) await showPlay(arg);
+    else if (name === 'calib' && arg) await showPlay(arg, { calib: true });
     else if (name === 'take' && arg) await showTake(arg);
     else if (name === 'settings') showSettings();
     else await showList();
@@ -78,12 +83,13 @@ async function loadSong(id) {
 }
 
 // ---------- 부르기 ----------
-async function showPlay(id) {
+async function showPlay(id, extra = {}) {
   loading('곡 불러오는 중…');
   let gone = false;
   cleanup = () => { gone = true; };
   const { meta, song, buffer, vocals } = await loadSong(id);
-  const opts = { vocals };
+  const opts = { vocals, ...extra };
+  if (params.get('fakedelay')) opts.fakeDelay = Number(params.get('fakedelay')) || 0;   // 시험용
   if (params.get('fakemic')) {
     // 시험용: 마이크 대신 목소리 파일을 흘린다
     const r = await fetch(params.get('fakemic'));
@@ -389,6 +395,13 @@ function showSettings() {
   };
   calBtn = el('button', { class: 'secondary', onclick: startCalib }, '두드려서 맞추기');
 
+  // 노래로 맞추기(11-14 사용자): 시험 곡은 '가자 때가 됐다' 하나로 고정, 첫 4줄만
+  const startSongCalib = async () => {
+    const s = (await allSongs()).find((x) => isCalibSong(x.title));
+    if (!s) { toast(`'${CALIB_TITLE}'를 먼저 곡 목록에 넣어 주세요`); return; }
+    go('#/calib/' + encodeURIComponent(s.id));
+  };
+
   // 저장 공간
   const storeEl = el('p', { class: 'muted' }, '저장 공간 확인 중…');
   const mb = (n) => (n > 1e9 ? (n / 1e9).toFixed(1) + 'GB' : Math.round(n / 1e6) + 'MB');
@@ -424,6 +437,12 @@ function showSettings() {
   };
   fillMics();
 
+  // 목소리 기준 (11-14 사용자: 남자 낮은 도를 못 잡음 → 남자·여자 나눔). 바꾸면 시험 중인 마이크 시험도 새 기준으로
+  const voiceSeg = seg('목소리 기준 (잡을 음 범위)', 'voice', Object.entries(VOICES).map(([k, v]) => [k, v.name]));
+  voiceSeg.addEventListener('click', (e) => {
+    if (e.target.closest('button') && micTest.on) { micTest.stop(); micTest.start(); }
+  });
+
   app.replaceChildren(el('div', { class: 'page' },
     el('header', { class: 'topbar' },
       el('button', { class: 'icon-btn', 'aria-label': '뒤로', html: ICON.back, onclick: () => history.back() }),
@@ -433,6 +452,8 @@ function showSettings() {
       el('section', {},
         el('h2', {}, '채점'),
         seg('난이도 (음이 얼마나 벗어나도 맞게 칠지)', 'level', Object.entries(LEVELS).map(([k, v]) => [k, v.name])),
+        voiceSeg,
+        el('small', { class: 'hint' }, '남자: 솔1(49Hz)까지 낮게 잡습니다. 여자: 100Hz(솔#2) 아래는 보지 않아 한 옥타브 낮게 잘못 잡는 일이 줄어듭니다.'),
         range('마이크 감도', 'micGate', 0.003, 0.05, 0.001, (v) => (v <= 0.008 ? '예민' : v <= 0.02 ? '보통' : '둔함'), '작은 소리도 잡으려면 왼쪽, 주변 소리가 잡히면 오른쪽.'),
         el('label', { class: 'toggle' }, echo, el('span', {}, '에코 줄이기 — 이어폰 없이 스피커로 들을 때만 켜세요')),
         el('label', { class: 'field col' }, el('span', {}, '마이크'), micSel,
@@ -450,7 +471,9 @@ function showSettings() {
         calBtn,
         calBox,
         el('p', { class: 'hint' }, '블루투스 이어폰은 소리가 0.15~0.3초 늦습니다. 악보의 세로줄이 노래보다 앞서가면 맞춰 주세요.'),
-        range('마이크 지연 (고급)', 'micLatency', 0, 200, 5, (v) => v + 'ms'),
+        el('button', { class: 'secondary', onclick: startSongCalib }, `노래로 맞추기 ('${CALIB_TITLE}' 첫 ${CALIB_LINES}줄)`),
+        el('p', { class: 'hint' }, '부른 목소리가 악보보다 늦게 칠해지면(음이 한 줄로 끌림) 이것으로 맞추세요. 아래 마이크 지연이 맞춰집니다.'),
+        range('마이크 지연 (고급)', 'micLatency', 0, 800, 5, (v) => v + 'ms'),
       ),
       el('section', {},
         el('h2', {}, '소리 크기'),

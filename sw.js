@@ -14,6 +14,7 @@ const FILES = [
   'js/take.js',
   'js/score.js',
   'js/mictest.js',
+  'js/calib.js',
   'js/vendor/vexflow-bravura.js',
   'js/library.js',
   'js/ultrastar.js',
@@ -58,18 +59,18 @@ self.addEventListener('fetch', (e) => {
       if (r.ok) c.put(key, r.clone()).catch((err) => console.warn('저장 못 함', key, err));
       return r;
     }
+    // 새 판을 먼저 — 3초 안에 안 오면 저장해 둔 것으로. 저장해 둔 것도 없으면 늦더라도 새 판을 끝까지 기다린다
+    // (11-14 점검: 전에는 3초가 지나면 저장본이 없어도 실패로 끝나 앱이 안 열렸다)
+    const net = fetch(req, { cache: 'no-cache' }).then((r) => {
+      if (r.ok) c.put(key, r.clone()).catch((err) => console.warn('저장 못 함', key, err));
+      return r;
+    });
     try {
-      // 새 판을 먼저 — 3초 안에 안 오면 저장해 둔 것으로
-      const fresh = await Promise.race([
-        fetch(req, { cache: 'no-cache' }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('느림')), 3000)),
-      ]);
-      if (fresh.ok) c.put(key, fresh.clone()).catch((err) => console.warn('저장 못 함', key, err));
-      return fresh;
+      return await Promise.race([net, new Promise((_, rej) => setTimeout(() => rej(new Error('느림')), 3000))]);
     } catch (err) {
       const hit = (await c.match(key)) || (url.pathname.endsWith('/') ? await c.match(key + 'index.html') : null) || (await c.match(req, { ignoreSearch: true }));
       if (hit) return hit;
-      throw err;
+      return net;
     }
   })());
 });

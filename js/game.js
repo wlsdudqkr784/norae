@@ -1,9 +1,10 @@
 // 부르기 화면 — 소리 재생, 마이크 음높이, 채점, 그리기.
-import { PitchDetector, freqToMidi, midiToFreq, foldOctave } from './pitch.js';
+import { PitchDetector, freqToMidi, midiToFreq, foldOctave, VOICES } from './pitch.js';
 import { settings, saveSettings, LEVELS, fmtTime, el, toast, audioCtx } from './util.js';
 import { updateSong, putBlob } from './library.js';
 import { TakePlayer } from './take.js';
 import { ScoreView } from './score.js';
+import { estimateLag, CALIB_LINES } from './calib.js';
 
 const ICON = {
   close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
@@ -85,6 +86,15 @@ export class Session {
     this.shownScore = 0;
     this.destroyed = false;
     this.endMs = Math.min(buffer.duration * 1000, (song.endMs || Infinity), song.lines[song.lines.length - 1].end + 2500);
+    // 노래로 지연 맞추기(11-14): 첫 4줄만 — 첫 줄 4초 앞에서 시작, 넷째 줄 끝 0.8초 뒤에 재고 끝. 점수·녹음은 남기지 않는다
+    if (opts.calib) {
+      const last = song.lines[Math.min(CALIB_LINES, song.lines.length) - 1];
+      this.calibStart = Math.max(0, song.lines[0].start - 4000);
+      this.offsetMs = this.calibStart;
+      this.endMs = Math.min(this.endMs, last.end + 800);
+      this.practiced = true;
+      this.calibRec = [];
+    }
 
     for (const n of song.notes) { n.hit = 0; n.segs = []; n.sung = []; }
     this.weightTotal = song.notes.reduce((a, n) => a + this.weight(n), 0) || 1;
@@ -111,7 +121,7 @@ export class Session {
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0;
     this.buf = new Float32Array(this.analyser.fftSize);
-    this.detector = new PitchDetector(this.ctx.sampleRate, this.analyser.fftSize);
+    this.detector = new PitchDetector(this.ctx.sampleRate, this.analyser.fftSize, VOICES[settings().voice] || VOICES.both);
 
     this.build();
     this.frame = this.frame.bind(this);
@@ -215,6 +225,15 @@ export class Session {
   }
 
   showReady() {
+    if (this.opts.calib) {
+      this.showOverlay(el('div', { class: 'card' },
+        el('h2', {}, '노래로 지연 맞추기'),
+        el('p', {}, `'${this.meta.title}' 첫 ${CALIB_LINES}줄을 평소처럼 불러 주세요. 다 부르면 내 목소리가 악보보다 얼마나 늦게 잡히는지 재서 맞춰 드립니다.`),
+        el('p', { class: 'hint' }, '노래할 때 쓰는 이어폰을 낀 채로 하세요. 이어폰을 바꾸면 다시 하면 됩니다.'),
+        el('button', { class: 'primary', onclick: () => this.begin() }, '시작'),
+      ));
+      return;
+    }
     const s = settings();
     const card = el('div', { class: 'card' },
       el('h2', {}, this.meta.title),
@@ -323,7 +342,7 @@ export class Session {
       this.fakeSrc.buffer = this.opts.fakeMic;
       this.fakeSrc.connect(this.analyser);
       if (this.recDest) this.fakeSrc.connect(this.recDest);
-      this.fakeSrc.start(when, fromMs / 1000);
+      this.fakeSrc.start(when + (this.opts.fakeDelay || 0) / 1000, fromMs / 1000);   // fakeDelay: 시험용 '늦게 잡히는 마이크'
     }
     if (this.vocals && fromMs / 1000 < this.vocals.duration) {
       this.voiceSrc = this.ctx.createBufferSource();
@@ -386,6 +405,7 @@ export class Session {
   }
 
   restart() {
+    if (this.opts.calib) { this.calibAgain(); return; }
     this.closeTake();
     this.dropTake();
     this.usedVoice = false;
@@ -429,9 +449,11 @@ export class Session {
     const go = (x) => this.seek(((x - r.left) / r.width) * this.endMs);
     go(e.clientX);
     const move = (ev) => { this.offsetPreview = ((ev.clientX - r.left) / r.width) * this.endMs; };
-    const up = (ev) => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); go(ev.clientX); };
+    const off = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', off); };
+    const up = (ev) => { off(); go(ev.clientX); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', off);   // 손가락이 화면 밖으로 나가 끌기가 취소돼도 듣는 것을 떼어 낸다(11-14 점검)
   }
 
   lineAt(t) {
@@ -525,12 +547,26 @@ export class Session {
   skipGap() {
     const t = this.heard();
     const n = this.song.notes.find((x) => x.start > t);
-    if (n && n.start - t > 4000) this.seek(n.start - 3000);
+    if (!(n && n.start - t > 4000)) return;
+    // 전주·간주만 건너뛴다 — 부를 음을 하나도 안 지나치니 최고 기록에 넣는다(11-14 점검: 전에는 '옮기기' 로 쳐서 기록·녹음이 빠졌다).
+    // 내 노래 녹음은 이어 붙일 수 없어, 전주(부른 음이 없을 때)면 여기서 새로 시작하고 간주면 이번 판은 녹음 없이
+    const keep = !this.practiced;
+    const intro = !this.song.notes.some((x) => x.start < t);
+    this.seek(n.start - 3000);
+    if (keep) {
+      this.practiced = false;
+      if (intro && this.state === 'playing') this.startTake();
+    }
   }
 
   async lockScreen(on) {
     try {
-      if (on && !this.wake && navigator.wakeLock) { this.wake = await navigator.wakeLock.request('screen'); }
+      if (on && !this.wake && navigator.wakeLock) {
+        // 다른 앱에 다녀오면 브라우저가 스스로 풀어 버린다 → 풀리면 비워 두어 다음 재생에서 다시 잡게(11-14 점검)
+        const w = await navigator.wakeLock.request('screen');
+        w.addEventListener('release', () => { if (this.wake === w) this.wake = null; });
+        this.wake = w;
+      }
       if (!on && this.wake) { await this.wake.release(); this.wake = null; }
     } catch { /* 화면 켜짐 유지를 못 해도 노래는 된다 */ }
   }
@@ -569,6 +605,7 @@ export class Session {
     if (prev == null || S <= prev) return;
     const dt = Math.min(60, S - prev);
     const midi = r.freq > 0 ? freqToMidi(r.freq) : 0;
+    if (this.calibRec) this.calibRec.push({ S, m: midi });
     const note = this.noteAt(S);
     let hit = false, shown = midi;
     if (midi > 0) {
@@ -890,7 +927,57 @@ export class Session {
   }
 
   // ---------- 끝 ----------
+  // ---------- 노래로 지연 맞추기 (11-14) ----------
+  finishCalib() {
+    if (this.state === 'done') return;
+    try { this.music.gain.setTargetAtTime(0, this.ctx.currentTime, 0.3); } catch (e) { console.warn('소리 줄이기 실패', e); }
+    this.fadeT = setTimeout(() => this.stopSources(), 1200);
+    this.state = 'done';
+    this.lockScreen(false);
+    this.playBtn.innerHTML = ICON.play;
+    const cur = settings().micLatency;
+    const r = estimateLag(this.calibRec, this.song.notes.filter((n) => n.start < this.endMs));
+    console.info('노래로 지연 맞추기', { cur, outLat: Math.round(this.outLat()), ...r });
+    const again = el('button', { class: 'secondary', onclick: () => this.calibAgain() }, '다시 하기');
+    const close = el('button', { class: 'secondary', onclick: () => this.quit() }, '닫기');
+    if (!this.micOk) {
+      this.showOverlay(el('div', { class: 'card' }, el('h2', {}, '잴 수 없음'), el('p', {}, '마이크를 못 써서 잴 수 없습니다.'), close));
+      return;
+    }
+    if (!r.ok) {
+      this.showOverlay(el('div', { class: 'card' }, el('h2', {}, '잴 수 없음'),
+        el('p', {}, r.why + (r.voicedSec != null ? ` (목소리 들은 시간 ${r.voicedSec.toFixed(1)}초)` : '')),
+        el('p', { class: 'hint' }, '가사를 따라 조금 크게 불러 주세요. 계속 안 되면 설정의 마이크 시험으로 음이 잡히는지 먼저 봐 주세요.'),
+        again, close));
+      return;
+    }
+    const next = Math.max(0, Math.min(800, cur + r.lag));
+    const sec = (ms) => (Math.abs(ms) / 1000).toFixed(2) + '초';
+    const what = Math.abs(r.lag) < 30 ? '이미 잘 맞습니다' : r.lag > 0 ? `목소리가 ${sec(r.lag)} 늦게 잡혔습니다` : `목소리가 ${sec(r.lag)} 빨리 잡혔습니다`;
+    const apply = el('button', { class: 'primary', onclick: () => {
+      saveSettings({ micLatency: next });
+      toast(`마이크 지연을 ${next}ms 로 맞췄습니다`);
+      this.quit();
+    } }, `맞추기 (마이크 지연 ${cur} → ${next}ms)`);
+    this.showOverlay(el('div', { class: 'card' },
+      el('h2', {}, what),
+      el('p', { class: 'muted' }, `맞는 정도 ${Math.round(100 * r.base)}% → 맞춘 뒤 ${Math.round(100 * r.score)}%`),
+      Math.abs(r.lag) < 30 ? null : apply,
+      again, close));
+  }
+
+  calibAgain() {
+    clearTimeout(this.fadeT);
+    for (const n of this.song.notes) { n.hit = 0; n.segs = []; n.sung = []; }
+    this.trail = [];
+    this.calibRec = [];
+    this.showOverlay(null);
+    this.state = 'paused';
+    this.play(this.calibStart);
+  }
+
   async finish() {
+    if (this.opts.calib) { this.finishCalib(); return; }
     if (this.state === 'done') return;
     const end = this.ctx.currentTime;
     try { this.music.gain.setTargetAtTime(0, end, 0.4); } catch { /* 무시 */ }
@@ -995,7 +1082,7 @@ export class Session {
       el('p', { class: 'muted' }, this.meta.title),
       el('div', { class: 'big-score' }, this.micOk ? sc.toLocaleString() : '—', el('small', {}, this.micOk ? '점' : '')),
       el('p', { class: 'word' }, word, isBest ? el('span', { class: 'badge' }, '최고 기록') : null),
-      !saved && this.micOk ? el('p', { class: 'hint' }, this.usedVoice && !this.practiced ? '가이드 목소리를 켜고 불러서 최고 기록에는 넣지 않았어요' : '줄 반복·건너뛰기를 써서 최고 기록에는 넣지 않았어요') : null,
+      !saved && this.micOk ? el('p', { class: 'hint' }, this.usedVoice && !this.practiced ? '가이드 목소리를 켜고 불러서 최고 기록에는 넣지 않았어요' : '줄 반복·옮기기를 써서 최고 기록에는 넣지 않았어요') : null,
       nSkip && this.micOk ? el('p', { class: 'hint' }, `건너뛴 ${nSkip}줄은 회색 · 부른 줄만 보면 ${Math.round(sungPct * 100)}%`) : null,
       bars,
       el('div', { class: 'pick-row' }, pickInfo, pickBtn),
