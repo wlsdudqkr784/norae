@@ -16,8 +16,9 @@ const MEAS_W = 170;  // 마디 하나에 넉넉한 너비 (악보 단위)
 const PAD = 10;
 
 const COL = {
-  paper: '#fbfaf5', nowRow: 'rgba(80, 140, 255, 0.10)', ink: '#15171c', lyric: '#30343d',
-  cur: '#2f6bff', cursor: 'rgba(47, 107, 255, 0.9)', hit: '#16a34a', miss: '#ea7a1a', voiceHit: '#16a34a', voiceMiss: '#ea7a1a',
+  // 따뜻한 종이(11-13 디자인): 흰 종이보다 덜 눈부시게. 지금 음·세로줄은 앱 대표 색(하늘색)을 종이에서 읽히게 진하게
+  paper: '#f2ede2', nowRow: 'rgba(56, 189, 248, 0.10)', ink: '#1c1a17', lyric: '#3a352e',
+  cur: '#0284c7', cursor: 'rgba(2, 132, 199, 0.9)', hit: '#16a34a', miss: '#ea7a1a', voiceHit: '#16a34a', voiceMiss: '#ea7a1a',
 };
 
 // 셋잇단 길이(박): 셋잇단 2분·4분·8분·16분. 적을 때는 보통 음표로 적고 '3' 묶음(Tuplet)이 길이를 2/3 로 줄인다
@@ -178,15 +179,22 @@ export class ScoreView {
     this.W = W; this.H = H; this.dpr = dpr;
     // 8마디: 가로 4마디 × 2줄 또는 2마디 × 4줄 중 크게 보이는 쪽
     let best = null;
+    const fit = (bpr, R) => Math.min((H - PAD * 2) / (R * ROW_H), (W - PAD * 2) / (bpr * MEAS_W + 30));
     for (const [bpr, R] of [[4, 2], [2, 4]]) {
-      const s = Math.min((H - PAD * 2) / (R * ROW_H), (W - PAD * 2) / (bpr * MEAS_W + 30));
+      const s = fit(bpr, R);
       if (!best || s > best.s) best = { bpr, R, s };
+    }
+    // 폰을 눕혀 높이가 낮으면 8마디는 글자를 못 읽을 만큼 작아진다 → 4마디 한 줄로 크게 (11-13 화면 검토)
+    if (best.s < 0.7) {
+      const s = fit(4, 1);
+      if (s > best.s) best = { bpr: 4, R: 1, s };
     }
     this.bpr = best.bpr;
     this.R = best.R;
     this.s = Math.max(0.45, Math.min(1.7, best.s));
     this.rowPx = ROW_H * this.s;
-    this.top = Math.max(PAD, (H - this.R * this.rowPx) / 2);
+    // 남는 높이는 위쪽에 더 둔다 → 악보가 바로 밑 가사와 붙어 한 덩어리로 읽힌다 (전에는 가운데라 가사와 사이가 떴다)
+    this.top = Math.max(PAD, (H - this.R * this.rowPx) * 0.65);
     this.rows = [];
     for (let i = 0; i < this.occ.length; i += this.bpr) {
       const os = this.occ.slice(i, i + this.bpr);
@@ -433,9 +441,12 @@ export class ScoreView {
     const s = this.s, R = this.R, rp = this.rowPx;
     const r = this.rowAt(t);
     // 종이
+    g.save();
+    g.shadowColor = 'rgba(0, 0, 0, 0.45)'; g.shadowBlur = 18; g.shadowOffsetY = 4;  // 종이 한 장처럼
     g.fillStyle = COL.paper;
     rrect(g, 6, this.top - 6, W - 12, R * rp + 12, 14);
     g.fill();
+    g.restore();
     const scoring = sess.micOk || sess.opts.fakeMic;
     for (let q = r; q < r + R && q < this.rows.length; q++) {
       const y0 = this.top + (q % R) * rp;

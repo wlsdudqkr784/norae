@@ -17,6 +17,8 @@ const ICON = {
   star: '<svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.9 6.8 19.6l1-5.8L3.5 9.7l5.9-.8z"/></svg>',
   more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6" class="fill"/><circle cx="12" cy="12" r="1.6" class="fill"/><circle cx="19" cy="12" r="1.6" class="fill"/></svg>',
   search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M16 16l4.5 4.5"/></svg>',
+  // 빈 목록 그림: 오선 다섯 줄 위에 이은 8분음표 둘
+  emptyArt: '<svg class="empty-art" viewBox="0 0 88 88"><g class="soft"><path d="M6 30h76M6 40h76M6 50h76M6 60h76M6 70h76"/></g><path d="M36 62V24l30-6v38"/><path d="M36 30l30-6" stroke-width="5"/><ellipse cx="29.5" cy="62" rx="7" ry="5.2" transform="rotate(-20 29.5 62)" class="fill"/><ellipse cx="59.5" cy="56" rx="7" ry="5.2" transform="rotate(-20 59.5 56)" class="fill"/></svg>',
 };
 
 let cleanup = null;   // 지금 화면을 떠날 때 할 일
@@ -144,11 +146,17 @@ async function showList() {
     countEl.textContent = list.length === songs.length ? `${songs.length}곡` : `${list.length} / ${songs.length}곡`;
     listEl.replaceChildren();
     if (!songs.length) {
+      // 빈 목록: 그림 하나 + 넣는 순서 세 단계 + 곡 넣기 (11-13 디자인)
       listEl.append(el('div', { class: 'empty' },
+        el('span', { 'aria-hidden': 'true', html: ICON.emptyArt }),
         el('h2', {}, '아직 곡이 없습니다'),
-        el('p', {}, '악보(.txt)와 노래(.mp3)를 함께 고르거나, 곡들을 묶은 zip 하나를 고르세요.'),
+        el('ol', { class: 'steps' },
+          el('li', {}, el('span', {}, 'PC 에서 ', el('b', {}, '연습 앱에 넣을 zip 만들기.py'), ' 를 더블클릭')),
+          el('li', {}, el('span', {}, '생긴 ', el('b', {}, '연습 앱용 곡 묶음.zip'), ' 을 폰으로 옮기기')),
+          el('li', {}, el('span', {}, '아래 ', el('b', {}, '곡 넣기'), ' 에서 그 zip 을 고르기')),
+        ),
         el('button', { class: 'primary', onclick: pick }, '곡 넣기'),
-        el('p', { class: 'hint' }, 'PC 의 ‘연습 앱에 넣을 zip 만들기.py’ 로 만든 zip 을 폰으로 옮겨 고르면 한 번에 들어갑니다.'),
+        el('p', { class: 'hint' }, '악보(.txt)와 노래(.mp3)를 함께 골라도 됩니다.'),
       ));
       return;
     }
@@ -165,13 +173,14 @@ async function showList() {
       try { await updateSong(m); } catch (err) { console.warn('즐겨찾기 저장 실패', err); toast('저장하지 못했습니다'); }
       if (settings().favOnly) draw();
     } });
-    const more = el('button', { class: 'icon-btn', 'aria-label': '더 보기', html: ICON.more, onclick: (e) => { e.stopPropagation(); songMenu(m); } });
+    const more = el('button', { class: 'icon-btn more', 'aria-label': '더 보기', html: ICON.more, onclick: (e) => { e.stopPropagation(); songMenu(m); } });
     const sub = [m.artist, fmtTime(m.durationMs), m.take ? '녹음 있음' : ''].filter(Boolean).join(' · ');
     const main = el('button', { class: 'song-main', onclick: () => go('#/play/' + encodeURIComponent(m.id)) },
       el('b', {}, m.title),
       el('small', {}, sub),
     );
-    const best = el('div', { class: 'best' + (m.best ? '' : ' none') }, m.best ? m.best.toLocaleString() : '—', el('small', {}, m.best ? '최고' : '기록 없음'));
+    // 최고 점수 표: 기록이 있을 때만 (없을 때 '— 기록 없음' 을 곡마다 붙이면 시끄럽다). 색은 결과 화면 한마디와 같은 기준
+    const best = m.best ? el('span', { class: 'best' + (m.best >= 7500 ? ' g1' : m.best >= 5500 ? ' g2' : ''), title: '최고 점수', 'aria-label': `최고 ${m.best.toLocaleString()}점` }, m.best.toLocaleString()) : null;
     const row = el('div', { class: 'song', role: 'listitem' }, star, main, best, more);
     // 길게 누르면 메뉴
     let hold = null;
@@ -215,12 +224,13 @@ async function showList() {
     }
     songs = await allSongs();
     draw();
-    box.replaceChildren(
+    // replaceChildren 은 null 을 글자 "null" 로 넣는다 → 빈 칸은 걸러 낸다 (11-13 화면 검토)
+    box.replaceChildren(...[
       el('h2', {}, res.added.length ? `${res.added.length}곡 넣었습니다` : '넣은 곡이 없습니다'),
       res.added.length ? el('p', { class: 'muted' }, res.added.slice(0, 6).join(', ') + (res.added.length > 6 ? ` 외 ${res.added.length - 6}곡` : '')) : null,
       res.failed.length ? el('div', { class: 'fails' }, el('b', {}, `못 넣은 것 ${res.failed.length}개`), el('ul', {}, res.failed.slice(0, 30).map((f) => el('li', {}, `${f.name} — ${f.why}`)))) : null,
       el('button', { class: 'primary', onclick: () => ov.remove() }, '확인'),
-    );
+    ].filter(Boolean));
     return res;
   }
 
@@ -315,6 +325,7 @@ function showSettings() {
     showLat();
   };
   const calBox = el('div', { class: 'calib' });
+  let calBtn = null;
   const startCalib = async () => {
     if (calib) return;
     const c = audioCtx();
@@ -335,14 +346,16 @@ function showSettings() {
       nodes.push(o);
     }
     const taps = [];
-    const msg = el('p', {}, '딸깍 소리에 맞춰 아래를 두드리세요 (16번)');
+    const msg = el('p', {}, `딸깍 소리에 맞춰 아래를 두드리세요 (0 / ${N})`);
     const pad = el('button', { class: 'tap-pad' }, '여기를 두드리기');
-    const tap = (e) => { e.preventDefault(); taps.push(c.currentTime); pad.classList.add('hit'); setTimeout(() => pad.classList.remove('hit'), 90); msg.textContent = `두드린 횟수 ${taps.length}`; };
+    const tap = (e) => { e.preventDefault(); taps.push(c.currentTime); pad.classList.add('hit'); setTimeout(() => pad.classList.remove('hit'), 90); msg.textContent = `두드린 횟수 ${Math.min(taps.length, N)} / ${N}`; };
     pad.addEventListener('pointerdown', tap);
+    calBtn.disabled = true;  // 맞추는 동안 다시 누르지 못하게
     const stop = (text) => {
       clearTimeout(calib.timer);
       for (const o of nodes) { try { o.stop(); } catch { /* 이미 끝남 */ } }
       calib = null;
+      calBtn.disabled = false;
       calBox.replaceChildren(text ? el('p', { class: 'hint' }, text) : '');
     };
     const finish = () => {
@@ -364,6 +377,7 @@ function showSettings() {
     calib = { timer: setTimeout(finish, (first - c.currentTime + N * GAP + 0.4) * 1000), stop };
     calBox.replaceChildren(msg, pad, el('button', { class: 'secondary', onclick: () => stop('그만두었습니다.') }, '그만'));
   };
+  calBtn = el('button', { class: 'secondary', onclick: startCalib }, '두드려서 맞추기');
 
   // 저장 공간
   const storeEl = el('p', { class: 'muted' }, '저장 공간 확인 중…');
@@ -399,11 +413,11 @@ function showSettings() {
           el('div', { class: 'seg small' },
             el('button', { 'aria-label': '10밀리초 줄이기', onclick: () => bump(-10) }, '−10'),
             el('button', { 'aria-label': '10밀리초 늘리기', onclick: () => bump(10) }, '+10'),
-            el('button', { onclick: () => { saveSettings({ outLatency: -1 }); showLat(); } }, '기기 값'),
+            el('button', { onclick: () => { saveSettings({ outLatency: -1 }); showLat(); } }, '기기 값으로'),
           )),
-        el('button', { class: 'secondary', onclick: startCalib }, '두드려서 맞추기'),
+        calBtn,
         calBox,
-        el('p', { class: 'hint' }, '블루투스 이어폰은 소리가 0.15~0.3초 늦습니다. 음 줄이 노래보다 빠르게 지나가면 맞춰 주세요.'),
+        el('p', { class: 'hint' }, '블루투스 이어폰은 소리가 0.15~0.3초 늦습니다. 악보의 세로줄이 노래보다 앞서가면 맞춰 주세요.'),
         range('마이크 지연 (고급)', 'micLatency', 0, 200, 5, (v) => v + 'ms'),
       ),
       el('section', {},

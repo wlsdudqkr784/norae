@@ -19,6 +19,7 @@ const FILES = [
   'js/pitch.js',
   'js/zip.js',
   'js/util.js',
+  'fonts/PretendardVariable.woff2',
 ];
 
 self.addEventListener('install', (e) => {
@@ -37,7 +38,7 @@ self.addEventListener('activate', (e) => {
   })());
 });
 
-const SHELL = /\.(html|css|js|png|webmanifest)$/;
+const SHELL = /\.(html|css|js|png|webmanifest|woff2)$/;
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
@@ -48,6 +49,14 @@ self.addEventListener('fetch', (e) => {
   e.respondWith((async () => {
     const c = await caches.open(CACHE);
     const key = url.origin + url.pathname; // ?test=1 같은 꼬리는 뗀다
+    // 글꼴(2MB)은 바뀌지 않는다 → 저장해 둔 것 먼저 (매번 새로 받지 않게)
+    if (url.pathname.endsWith('.woff2')) {
+      const hit = await c.match(key);
+      if (hit) return hit;
+      const r = await fetch(req);
+      if (r.ok) c.put(key, r.clone()).catch((err) => console.warn('저장 못 함', key, err));
+      return r;
+    }
     try {
       // 새 판을 먼저 — 3초 안에 안 오면 저장해 둔 것으로
       const fresh = await Promise.race([

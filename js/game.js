@@ -55,6 +55,7 @@ export class Session {
     this.curLine = -2;
     this.view = { center: 0, span: 14, init: false };
     this.lineScores = new Array(song.lines.length).fill(null);
+    this.skipped = new Set();  // 옮기기로 건너뛴 줄 (결과에서 회색으로)
     this.ratedUntil = -1;
     this.lastDetect = 0;
     this.shownScore = 0;
@@ -349,6 +350,7 @@ export class Session {
     this.dropTake();
     for (const n of this.song.notes) { n.hit = 0; n.segs = []; }
     this.lineScores.fill(null);
+    this.skipped.clear();
     this.ratedUntil = -1;
     this.trail = [];
     this.practiced = false;
@@ -364,6 +366,13 @@ export class Session {
     ms = Math.max(0, Math.min(ms, this.endMs - 100));
     this.practiced = true;
     this.dropTake();
+    // 앞으로 옮겨 아직 안 매긴 줄을 지나치면: 한 음도 안 불렀으면 '건너뜀', 조금이라도 불렀으면 거기까지로 매긴다
+    for (const l of this.song.lines) {
+      if (l.index <= this.ratedUntil || l.end > ms) continue;
+      if (l.notes.some((n) => n.hit > 0)) this.lineScores[l.index] = this.lineAcc(l);
+      else this.skipped.add(l.index);
+    }
+    for (const l of this.song.lines) if (l.end > ms) this.skipped.delete(l.index);
     // 다시 부르는 곳의 점수는 지우고 새로 매긴다
     for (const n of this.song.notes) if (n.end > ms) { n.hit = 0; n.segs = []; }
     for (const l of this.song.lines) if (l.end > ms) this.lineScores[l.index] = null;
@@ -561,6 +570,7 @@ export class Session {
       const l = L[this.ratedUntil];
       const a = this.lineAcc(l);
       this.lineScores[l.index] = a;
+      this.skipped.delete(l.index);
       if (a == null || !this.micOk) continue;
       const word = a >= 0.9 ? '완벽!' : a >= 0.7 ? '좋아요' : a >= 0.45 ? '괜찮아요' : '';
       if (word) {
@@ -800,29 +810,72 @@ export class Session {
   }
 
   showResult(sc, saved, isBest) {
-    const word = !this.micOk ? '점수 없음 (마이크 꺼짐)' : sc >= 9000 ? '최고예요!' : sc >= 7500 ? '아주 좋아요' : sc >= 5500 ? '좋아요' : sc >= 3500 ? '조금 더!' : '연습해 봐요';
-    const bars = el('div', { class: 'bars', 'aria-label': '줄마다 맞음' });
-    this.song.lines.forEach((l, i) => {
-      const a = this.lineScores[i] ?? this.lineAcc(l) ?? 0;
-      const b = el('button', {
-        class: 'bar ' + (a >= 0.7 ? 'good' : a >= 0.45 ? 'mid' : 'low'),
-        style: `--h:${Math.max(6, a * 100)}%`,
-        title: `${i + 1}째 줄 ${Math.round(a * 100)}%`,
-        'aria-label': `${i + 1}째 줄 ${Math.round(a * 100)}%, 이 줄 연습`,
-        onclick: () => this.practiceLine(i),
+    // 건너뛴 줄이 있으면 한마디는 '부른 줄'만 보고 정한다 (건너뛴 줄 때문에 '연습해 봐요'가 나오지 않게)
+    const lines = this.song.lines;
+    const nSkip = lines.filter((l, i) => this.skipped.has(i)).length;
+    let judge = sc, sungPct = null;
+    if (nSkip) {
+      let w = 0, s = 0;
+      lines.forEach((l, i) => {
+        if (this.skipped.has(i)) return;
+        for (const n of l.notes) { const k = this.weight(n); w += k; s += k * this.noteFrac(n); }
       });
+      sungPct = w > 0 ? s / w : 0;
+      judge = Math.round(sungPct * 10000);
+    }
+    const word = !this.micOk ? '점수 없음 (마이크 꺼짐)' : judge >= 9000 ? '최고예요!' : judge >= 7500 ? '아주 좋아요' : judge >= 5500 ? '좋아요' : judge >= 3500 ? '조금 더!' : '연습해 봐요';
+
+    // 줄 막대: 막대가 가늘어도 고르기 쉽게 — 누르거나 끌면 그 줄이 골라지고, 아래 큰 단추로 연습한다
+    const lineText = (l) => l.notes.map((n) => n.text).join('').replace(/~/g, '').replace(/\s+/g, ' ').trim();
+    const accOf = (i) => this.lineScores[i] ?? this.lineAcc(lines[i]) ?? 0;
+    const pickInfo = el('p', { class: 'pick-info' }, '막대를 누르거나 밀어서 연습할 줄을 고르세요');
+    const pickBtn = el('button', { class: 'secondary', disabled: true }, '연습');
+    let picked = -1;
+    const barEls = [];
+    const pick = (i) => {
+      if (i < 0 || i >= lines.length || i === picked) return;
+      if (picked >= 0) barEls[picked].classList.remove('picked');
+      picked = i;
+      barEls[i].classList.add('picked');
+      const t = lineText(lines[i]);
+      pickInfo.replaceChildren(el('b', {}, `${i + 1}째 줄 · ${this.skipped.has(i) ? '건너뜀' : Math.round(accOf(i) * 100) + '%'}`), t ? ' ' + t : '');
+      pickBtn.disabled = false;
+      pickBtn.setAttribute('aria-label', `${i + 1}째 줄 연습`);
+    };
+    pickBtn.addEventListener('click', () => { if (picked >= 0) this.practiceLine(picked); });
+    const bars = el('div', { class: 'bars', role: 'group', 'aria-label': '줄마다 맞음' });
+    lines.forEach((l, i) => {
+      const skip = this.skipped.has(i);
+      const a = accOf(i);
+      const b = el('button', {
+        class: 'bar ' + (skip ? 'skip' : a >= 0.7 ? 'good' : a >= 0.45 ? 'mid' : 'low'),
+        style: `--h:${skip ? 6 : Math.max(6, a * 100)}%`,
+        title: `${i + 1}째 줄 ${skip ? '건너뜀' : Math.round(a * 100) + '%'}`,
+        'aria-label': `${i + 1}째 줄 ${skip ? '건너뜀' : Math.round(a * 100) + '%'}`,
+        onclick: () => pick(i),
+      });
+      barEls.push(b);
       bars.append(b);
     });
+    const barAt = (x) => {
+      const r = bars.getBoundingClientRect();
+      return Math.max(0, Math.min(lines.length - 1, Math.floor(((x - r.left + bars.scrollLeft) / bars.scrollWidth) * lines.length)));
+    };
+    bars.addEventListener('pointerdown', (e) => { bars.setPointerCapture?.(e.pointerId); pick(barAt(e.clientX)); });
+    bars.addEventListener('pointermove', (e) => { if (e.buttons) pick(barAt(e.clientX)); });
+
     this.showOverlay(el('div', { class: 'card result' },
       el('p', { class: 'muted' }, this.meta.title),
       el('div', { class: 'big-score' }, this.micOk ? sc.toLocaleString() : '—', el('small', {}, this.micOk ? '점' : '')),
       el('p', { class: 'word' }, word, isBest ? el('span', { class: 'badge' }, '최고 기록') : null),
       !saved && this.micOk ? el('p', { class: 'hint' }, '줄 반복·건너뛰기를 써서 최고 기록에는 넣지 않았어요') : null,
-      el('p', { class: 'hint' }, '막대를 누르면 그 줄만 반복 연습합니다'),
+      nSkip && this.micOk ? el('p', { class: 'hint' }, `건너뛴 ${nSkip}줄은 회색 · 부른 줄만 보면 ${Math.round(sungPct * 100)}%`) : null,
       bars,
-      this.meta.take ? el('button', { class: 'secondary', onclick: () => this.showTake() }, '내 노래 듣기') : null,
+      el('div', { class: 'pick-row' }, pickInfo, pickBtn),
+      // 단추 위계: 다시 부르기만 강조 · 내 노래 듣기는 보조 · 목록으로는 글자 단추
       el('button', { class: 'primary', onclick: () => this.restart() }, '다시 부르기'),
-      el('button', { class: 'secondary', onclick: () => this.quit() }, '목록으로'),
+      this.meta.take ? el('button', { class: 'secondary', onclick: () => this.showTake() }, '내 노래 듣기') : null,
+      el('button', { class: 'text-btn', onclick: () => this.quit() }, '목록으로'),
     ));
   }
 
