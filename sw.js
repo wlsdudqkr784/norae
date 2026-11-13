@@ -1,6 +1,6 @@
 // 오프라인 준비 — 앱 파일을 저장해 두고, 인터넷이 되면 새 판을 먼저 받는다.
 // 곡은 여기서 다루지 않는다(곡은 IndexedDB 에 있다).
-const CACHE = 'norae-app-v1';
+const CACHE = 'norae-app-v2';
 const FILES = [
   './',
   'index.html',
@@ -12,6 +12,8 @@ const FILES = [
   'js/main.js',
   'js/game.js',
   'js/take.js',
+  'js/score.js',
+  'js/vendor/vexflow-bravura.js',
   'js/library.js',
   'js/ultrastar.js',
   'js/pitch.js',

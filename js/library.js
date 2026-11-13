@@ -129,6 +129,7 @@ export async function importFiles(files, onProgress = () => {}) {
   const txts = items.filter((i) => /\.txt$/i.test(i.name) && i.size < 2_000_000);
   const audios = items.filter((i) => AUDIO_EXT.test(i.name));
   const imgs = items.filter((i) => IMG_EXT.test(i.name));
+  const scores = items.filter((i) => /\.json$/i.test(i.name) && i.size < 5_000_000);
   const added = [], failed = [];
 
   const existing = new Map((await allSongs()).map((s) => [s.id, s]));
@@ -147,6 +148,16 @@ export async function importFiles(files, onProgress = () => {}) {
       const id = songId(song.title, song.artist);
       const old = existing.get(id);
       const audioBlob = await audio.getBlob();
+      // 노래방 악보(<곡>.악보.json) — 없거나 안 맞으면 음 줄 화면만 쓴다(실패로 치지 않는다)
+      let score = null;
+      const sItem = findScore(t, scores);
+      if (sItem) {
+        try {
+          const sj = JSON.parse(decodeText(new Uint8Array(await (await sItem.getBlob()).arrayBuffer())));
+          if (sj && sj.v === 1 && Array.isArray(sj.notes) && sj.notes.length === song.notes.length) score = sj;
+          else console.warn('악보 자료가 곡과 안 맞음', base(sItem.name), sj && sj.notes && sj.notes.length, song.notes.length);
+        } catch (e) { console.warn('악보 자료를 못 읽음', base(sItem.name), e); }
+      }
       const meta = {
         id,
         title: song.title,
@@ -163,6 +174,7 @@ export async function importFiles(files, onProgress = () => {}) {
         lastPlayed: old?.lastPlayed || 0,
         fav: !!old?.fav,
         take: old?.take || null, // 내 노래 녹음 정보(소리는 blobs 의 id:take)
+        score,                   // 노래방 악보 자료(없으면 null)
       };
       await saveSong(meta, new Blob([audioBlob], { type: meta.audioType }), cover ? await cover.getBlob() : null);
       added.push(song.title);
@@ -172,6 +184,13 @@ export async function importFiles(files, onProgress = () => {}) {
   }
   if (!txts.length) failed.push({ name: '(고른 파일)', why: '.txt 악보 파일이 없음' });
   return { added, failed };
+}
+
+function findScore(txtItem, pool) {
+  const d = norm(dir(txtItem.name));
+  const want = norm(stem(txtItem.name)) + '.악보';
+  const hits = pool.filter((p) => norm(stem(p.name)) === want);
+  return hits.find((p) => norm(dir(p.name)) === d) || hits[0] || null;
 }
 
 function findPartner(txtItem, wanted, pool) {

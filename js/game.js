@@ -3,6 +3,7 @@ import { PitchDetector, freqToMidi, midiToFreq, foldOctave } from './pitch.js';
 import { settings, saveSettings, LEVELS, fmtTime, el, toast, audioCtx } from './util.js';
 import { updateSong, putBlob } from './library.js';
 import { TakePlayer } from './take.js';
+import { ScoreView } from './score.js';
 
 const ICON = {
   close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
@@ -62,6 +63,11 @@ export class Session {
 
     for (const n of song.notes) { n.hit = 0; n.segs = []; }
     this.weightTotal = song.notes.reduce((a, n) => a + this.weight(n), 0) || 1;
+    // 노래방 악보(오선 8마디) — 악보 자료가 없거나 못 그리면 음 줄 화면으로 물러난다
+    this.scoreView = null;
+    if (meta.score) {
+      try { this.scoreView = new ScoreView(meta.score, song); } catch (e) { console.warn('노래방 악보를 못 씀 — 음 줄 화면으로', e); }
+    }
 
     this.music = this.ctx.createGain();
     this.music.gain.value = settings().musicVol;
@@ -102,8 +108,9 @@ export class Session {
     this.canvas = el('canvas', { class: 'lane' });
     this.laneWrap = el('div', { class: 'lane-wrap' }, this.canvas);
     this.rateEl = el('div', { class: 'rate' });
-    this.curEl = el('div', { class: 'lyr cur' });
-    this.nextEl = el('div', { class: 'lyr next' });
+    // 노래방 가사: 두 줄 — 위 줄은 왼쪽, 아래 줄은 오른쪽. 부르는 줄이 바뀌면 다 부른 자리에 다음다음 줄이 온다
+    this.curEl = el('div', { class: 'lyr a' });
+    this.nextEl = el('div', { class: 'lyr b' });
     this.waitEl = el('div', { class: 'wait' });
     this.skipBtn = el('button', { class: 'chip skip', html: ICON.skip + '<span>건너뛰기</span>', onclick: () => this.skipGap() });
     const lyrics = el('section', { class: 'lyrics' }, this.rateEl, this.waitEl, this.curEl, this.nextEl, this.skipBtn);
@@ -565,10 +572,19 @@ export class Session {
     }
   }
 
-  // 음 줄 그리기
+  // 언제나 악보 화면(11-13 사용자). 악보 자료(.악보.json)가 없거나 못 그리는 곡만 음 줄 화면
+  usingScore() { return !!this.scoreView; }
+
+  // 음 줄 그리기 (악보 화면이면 ScoreView 가 그린다)
   draw(dt) {
     const g = this.g, W = this.W, H = this.H;
     if (!g) return;
+    if (this.usingScore()) {
+      try { this.scoreView.draw(g, W, H, this.heard(), this); return; } catch (e) {
+        console.error('악보 그리기 실패 — 음 줄 화면으로', e);
+        this.scoreView = null;
+      }
+    }
     const t = this.heard();
     const cx = Math.round(W * 0.24);
     const msWindow = Math.max(3200, Math.min(6500, W * 9));
@@ -685,12 +701,16 @@ export class Session {
     const i = this.lineAt(t);
     if (i !== this.curLine) {
       this.curLine = i;
-      this.fill(this.curEl, L[i]);
-      this.fill(this.nextEl, L[i + 1]);
+      const slot = [this.curEl, this.nextEl];
+      this.lyrNow = slot[i % 2];
+      this.fill(slot[i % 2], L[i]);
+      this.fill(slot[(i + 1) % 2], L[i + 1]);
+      slot[i % 2].classList.add('now');
+      slot[(i + 1) % 2].classList.remove('now');
     }
     const line = L[i];
     if (line) {
-      const spans = this.curEl.children;
+      const spans = this.lyrNow.children;
       line.syllables.forEach((s, j) => {
         const p = Math.max(0, Math.min(1, (t - s.start) / Math.max(1, s.end - s.start)));
         const q = Math.round(p * 100);
