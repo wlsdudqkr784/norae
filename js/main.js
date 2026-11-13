@@ -5,6 +5,7 @@ import { allSongs, getSong, getBlob, updateSong, deleteSong, deleteAll, importFi
 import { parseUltraStar } from './ultrastar.js';
 import { Session, releaseMic, listMics } from './game.js';
 import { TakePlayer } from './take.js';
+import { MicTest } from './mictest.js';
 
 const app = document.getElementById('app');
 const params = new URLSearchParams(location.search);
@@ -405,7 +406,15 @@ function showSettings() {
   const echo = el('input', { type: 'checkbox', checked: s.echoCancel, onchange: (e) => saveSettings({ echoCancel: e.target.checked }) });
 
   // 마이크 고르기 (11-13: 마이크를 켜면 블루투스 이어폰 음질이 떨어짐 → 폰 마이크를 고르면 나아질 수 있다)
-  const micSel = el('select', { class: 'select', 'aria-label': '마이크', onchange: (e) => { saveSettings({ micId: e.target.value }); releaseMic(); } });
+  const micTest = new MicTest();
+  // 마이크를 바꾸면 시험 중이면 새 마이크로 다시 연다
+  const micSel = el('select', { class: 'select', 'aria-label': '마이크', onchange: (e) => {
+    saveSettings({ micId: e.target.value });
+    const was = micTest.on;
+    micTest.stop();
+    releaseMic();
+    if (was) micTest.start();
+  } });
   const fillMics = async () => {
     const mics = await listMics();
     const cur = settings().micId;
@@ -428,6 +437,7 @@ function showSettings() {
         el('label', { class: 'toggle' }, echo, el('span', {}, '에코 줄이기 — 이어폰 없이 스피커로 들을 때만 켜세요')),
         el('label', { class: 'field col' }, el('span', {}, '마이크'), micSel,
           el('small', { class: 'hint' }, '블루투스 이어폰으로 들을 때 마이크를 켜면 소리가 나빠지면 폰 마이크(이어폰이 아닌 것)를 골라 보세요. 이름이 안 보이면 한 번 불러 본 뒤 다시 여세요.')),
+        micTest.root,
       ),
       el('section', {},
         el('h2', {}, '소리 지연'),
@@ -458,7 +468,7 @@ function showSettings() {
   ));
   showLat();
   showStore();
-  cleanup = () => { if (calib) calib.stop(''); };
+  cleanup = () => { if (calib) calib.stop(''); micTest.stop(); };
 }
 
 // ---------- 시작 ----------

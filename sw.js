@@ -13,6 +13,7 @@ const FILES = [
   'js/game.js',
   'js/take.js',
   'js/score.js',
+  'js/mictest.js',
   'js/vendor/vexflow-bravura.js',
   'js/library.js',
   'js/ultrastar.js',

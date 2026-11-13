@@ -111,6 +111,14 @@ svg .fill { fill: currentColor; stroke-width: 1.5; }
 .toggle { display: flex; align-items: center; gap: 12px; min-height: 48px; text-align: left; }
 .toggle input { width: 22px; height: 22px; accent-color: var(--accent); flex: none; }
 input[type=range] { width: 100%; height: 36px; accent-color: var(--accent); margin: 0; }
+.mictest { display: grid; gap: 8px; padding: 12px; background: var(--surface2); border-radius: var(--r-m); }
+.mt-top { display: flex; align-items: baseline; gap: 10px; }
+.mt-name { font-size: 2.2rem; font-weight: 800; color: var(--accent); min-width: 4ch; font-variant-numeric: tabular-nums; }
+.mt-hz { color: var(--muted); }
+.mt-level { position: relative; height: 10px; background: var(--surface3); border-radius: 999px; overflow: hidden; }
+.mt-level i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--muted); border-radius: 999px; }
+.mt-level b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
+.mt-graph { width: 100%; height: 120px; background: var(--surface); border-radius: var(--r-s); }
 .select { font: inherit; color: var(--text); background: var(--surface2); border: 1px solid var(--line); border-radius: var(--r-s); min-height: 44px; padding: 0 12px; width: 100%; }
 
 .loading { min-height: 100vh; min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 16px; color: var(--muted); }

@@ -22,7 +22,7 @@ let micCache = null; // {stream, echo, id}
 // 마이크를 켜면 음질이 떨어지는 까닭(11-13): 블루투스 이어폰은 마이크를 쓰는 순간 '통화 방식'(HFP, 모노·낮은 음질)으로 바뀐다.
 // 폰 본체 마이크를 고르면(설정 '마이크') 이어폰은 음악 방식 그대로일 수 있다 — 기기마다 달라 사용자가 듣고 고른다.
 // 에코 줄이기(통화용 소리 처리)도 음질을 떨어뜨려 기본은 끔.
-async function getMic(echo, id = '') {
+export async function getMic(echo, id = '') {
   if (micCache && micCache.echo === echo && micCache.id === id && micCache.stream.getAudioTracks().some((t) => t.readyState === 'live')) return micCache.stream;
   if (micCache) micCache.stream.getTracks().forEach((t) => t.stop());
   const audio = { echoCancellation: echo, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
