@@ -1,0 +1,63 @@
+// 오프라인 준비 — 앱 파일을 저장해 두고, 인터넷이 되면 새 판을 먼저 받는다.
+// 곡은 여기서 다루지 않는다(곡은 IndexedDB 에 있다).
+const CACHE = 'norae-app-v1';
+const FILES = [
+  './',
+  'index.html',
+  'style.css',
+  'manifest.webmanifest',
+  'icons/icon-192.png',
+  'icons/icon-512.png',
+  'icons/icon-maskable-512.png',
+  'js/main.js',
+  'js/game.js',
+  'js/take.js',
+  'js/library.js',
+  'js/ultrastar.js',
+  'js/pitch.js',
+  'js/zip.js',
+  'js/util.js',
+];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil((async () => {
+    const c = await caches.open(CACHE);
+    // 하나가 안 받아져도 나머지는 저장한다
+    await Promise.all(FILES.map((f) => c.add(new Request(f, { cache: 'reload' })).catch((err) => console.warn('저장 못 함', f, err))));
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil((async () => {
+    for (const k of await caches.keys()) if (k !== CACHE && k.startsWith('norae-app-')) await caches.delete(k);
+    await self.clients.claim();
+  })());
+});
+
+const SHELL = /\.(html|css|js|png|webmanifest)$/;
+
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.origin !== location.origin || !url.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
+  if (!(SHELL.test(url.pathname) || url.pathname.endsWith('/'))) return;
+  e.respondWith((async () => {
+    const c = await caches.open(CACHE);
+    const key = url.origin + url.pathname; // ?test=1 같은 꼬리는 뗀다
+    try {
+      // 새 판을 먼저 — 3초 안에 안 오면 저장해 둔 것으로
+      const fresh = await Promise.race([
+        fetch(req, { cache: 'no-cache' }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('느림')), 3000)),
+      ]);
+      if (fresh.ok) c.put(key, fresh.clone()).catch((err) => console.warn('저장 못 함', key, err));
+      return fresh;
+    } catch (err) {
+      const hit = (await c.match(key)) || (url.pathname.endsWith('/') ? await c.match(key + 'index.html') : null) || (await c.match(req, { ignoreSearch: true }));
+      if (hit) return hit;
+      throw err;
+    }
+  })());
+});
