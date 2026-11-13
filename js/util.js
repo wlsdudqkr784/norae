@@ -6,6 +6,7 @@ const DEFAULTS = {
   micLatency: 40,       // 마이크 지연 ms
   micGate: 0.012,       // 이보다 작은 소리는 무시
   echoCancel: false,    // 스피커로 들을 때 켬
+  micId: '',            // 고른 마이크(''= 기기 기본). 블루투스 이어폰 음질이 떨어지면 폰 마이크를 고른다
   musicVol: 0.9,
   guide: false,         // 가이드 음
   guideVol: 0.35,

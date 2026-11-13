@@ -18,15 +18,39 @@ const ICON = {
 
 export { audioCtx };
 
-let micCache = null; // {stream, echo}
-async function getMic(echo) {
-  if (micCache && micCache.echo === echo && micCache.stream.getAudioTracks().some((t) => t.readyState === 'live')) return micCache.stream;
+let micCache = null; // {stream, echo, id}
+// 마이크를 켜면 음질이 떨어지는 까닭(11-13): 블루투스 이어폰은 마이크를 쓰는 순간 '통화 방식'(HFP, 모노·낮은 음질)으로 바뀐다.
+// 폰 본체 마이크를 고르면(설정 '마이크') 이어폰은 음악 방식 그대로일 수 있다 — 기기마다 달라 사용자가 듣고 고른다.
+// 에코 줄이기(통화용 소리 처리)도 음질을 떨어뜨려 기본은 끔.
+async function getMic(echo, id = '') {
+  if (micCache && micCache.echo === echo && micCache.id === id && micCache.stream.getAudioTracks().some((t) => t.readyState === 'live')) return micCache.stream;
   if (micCache) micCache.stream.getTracks().forEach((t) => t.stop());
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: echo, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
-  });
-  micCache = { stream, echo };
+  const audio = { echoCancellation: echo, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+  let stream;
+  if (id) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: { exact: id } } });
+    } catch (e) {
+      // 고른 마이크가 없어졌으면(이어폰을 뺌 등) 기본 마이크로 물러난다
+      console.warn('고른 마이크를 못 씀 — 기본 마이크로', e);
+      toast('고른 마이크가 없어 기본 마이크를 씁니다');
+    }
+  }
+  if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio });
+  micCache = { stream, echo, id };
   return stream;
+}
+
+// 설정 화면용: 마이크 목록 [{id, label}] (이름은 마이크를 한 번 허락해야 보인다)
+export async function listMics() {
+  try {
+    const ds = await navigator.mediaDevices.enumerateDevices();
+    return ds.filter((d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+      .map((d, i) => ({ id: d.deviceId, label: d.label || `마이크 ${i + 1}` }));
+  } catch (e) {
+    console.warn('마이크 목록을 못 읽음', e);
+    return [];
+  }
 }
 export function releaseMic() {
   if (micCache) { micCache.stream.getTracks().forEach((t) => t.stop()); micCache = null; }
@@ -62,7 +86,7 @@ export class Session {
     this.destroyed = false;
     this.endMs = Math.min(buffer.duration * 1000, (song.endMs || Infinity), song.lines[song.lines.length - 1].end + 2500);
 
-    for (const n of song.notes) { n.hit = 0; n.segs = []; }
+    for (const n of song.notes) { n.hit = 0; n.segs = []; n.sung = []; }
     this.weightTotal = song.notes.reduce((a, n) => a + this.weight(n), 0) || 1;
     // 노래방 악보(오선 8마디) — 악보 자료가 없거나 못 그리면 음 줄 화면으로 물러난다
     this.scoreView = null;
@@ -213,7 +237,7 @@ export class Session {
       try { this.recDest = this.ctx.createMediaStreamDestination(); this.recStream = this.recDest.stream; } catch (e) { console.warn('시험 녹음 줄기 실패', e); }
     } else {
       try {
-        const stream = await getMic(settings().echoCancel);
+        const stream = await getMic(settings().echoCancel, settings().micId);
         this.micNode = this.ctx.createMediaStreamSource(stream);
         this.micNode.connect(this.analyser);
         this.micOk = true;
@@ -365,7 +389,7 @@ export class Session {
     this.closeTake();
     this.dropTake();
     this.usedVoice = false;
-    for (const n of this.song.notes) { n.hit = 0; n.segs = []; }
+    for (const n of this.song.notes) { n.hit = 0; n.segs = []; n.sung = []; }
     this.lineScores.fill(null);
     this.skipped.clear();
     this.ratedUntil = -1;
@@ -391,7 +415,7 @@ export class Session {
     }
     for (const l of this.song.lines) if (l.end > ms) this.skipped.delete(l.index);
     // 다시 부르는 곳의 점수는 지우고 새로 매긴다
-    for (const n of this.song.notes) if (n.end > ms) { n.hit = 0; n.segs = []; }
+    for (const n of this.song.notes) if (n.end > ms) { n.hit = 0; n.segs = []; n.sung = []; }
     for (const l of this.song.lines) if (l.end > ms) this.lineScores[l.index] = null;
     this.ratedUntil = this.song.lines.findIndex((l) => l.end > ms) - 1;
     if (this.ratedUntil < -1) this.ratedUntil = this.song.lines.length - 1;
@@ -551,6 +575,8 @@ export class Session {
       if (note) {
         shown = foldOctave(midi, note.midi);
         if (note.type !== 'free') {
+          // 부른 음높이를 음마다 모아 둔다 → 악보에 '인식된 음' 과 빨간 짙기로 보인다(11-13)
+          if (note.sung && note.sung.length < 600) note.sung.push(shown);
           const tol = LEVELS[settings().level].tol;
           hit = note.type === 'rap' || note.type === 'rapgolden' || Math.abs(shown - note.midi) <= tol;
           if (hit) {
@@ -608,6 +634,14 @@ export class Session {
       this.guideNodes.push(o);
     }
     this.guideUntil = until;
+  }
+
+  // 이 음에서 부른 음높이(가운데 값, 옥타브는 악보 음 쪽으로 접음). 목소리가 거의 없었으면 null
+  noteSung(n) {
+    const v = n.sung;
+    if (!v || v.length < 3) return null;
+    const a = v.slice().sort((x, y) => x - y);
+    return a[a.length >> 1];
   }
 
   noteFrac(n) {

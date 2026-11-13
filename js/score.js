@@ -18,8 +18,17 @@ const PAD = 10;
 const COL = {
   // 따뜻한 종이(11-13 디자인): 흰 종이보다 덜 눈부시게. 지금 음·세로줄은 앱 대표 색(하늘색)을 종이에서 읽히게 진하게
   paper: '#f2ede2', nowRow: 'rgba(56, 189, 248, 0.10)', ink: '#1c1a17', lyric: '#3a352e',
-  cur: '#0284c7', cursor: 'rgba(2, 132, 199, 0.9)', hit: '#16a34a', miss: '#ea7a1a', voiceHit: '#16a34a', voiceMiss: '#ea7a1a',
+  cur: '#0284c7', cursor: 'rgba(2, 132, 199, 0.9)',
+  // 부른 음 칠하기(11-13 사용자): 맞으면 파랑, 아니면 빨강 — 원래 음과 멀수록 짙게. 목소리가 없었으면 회색
+  hit: '#1d4ed8', unsung: '#a8a29e', voiceHit: '#1d4ed8', voiceMiss: '#dc2626',
 };
+// 빨강 짙기: 반음 0.5 차이 = 옅은 빨강 → 5반음 이상 = 짙은 빨강
+const RED_LIGHT = [248, 113, 113], RED_DARK = [127, 29, 29];
+export function redFor(dev) {
+  const p = Math.max(0, Math.min(1, (Math.abs(dev) - 0.5) / 4.5));
+  const c = RED_LIGHT.map((a, i) => Math.round(a + (RED_DARK[i] - a) * p));
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+}
 
 // 셋잇단 길이(박): 셋잇단 2분·4분·8분·16분. 적을 때는 보통 음표로 적고 '3' 묶음(Tuplet)이 길이를 2/3 로 줄인다
 const TRIP = [[4 / 3, 'h'], [2 / 3, 'q'], [1 / 3, '8'], [1 / 6, '16']];
@@ -256,7 +265,7 @@ export class ScoreView {
         };
         if (from - ms < 0.03 && me - to < 0.03 && M.len >= 2) {
           const n = new VF.StaveNote({ keys: ['b/4'], duration: 'wr', clef: 'treble', align_center: true });
-          ticks.push({ note: n, beat: from, rest: true });
+          ticks.push({ note: n, beat: from, rest: true, whole: true });
           return;
         }
         let b = from;
@@ -363,6 +372,9 @@ export class ScoreView {
       // 시각 → 가로 위치 짚기
       anchors.push({ ms: b.o.startMs, x: st.getNoteStartX() - 4 });
       for (const tk of b.ticks) {
+        // 온쉼표는 마디 가운데에 그려지지만 마디 전체의 쉼이다 → 짚지 않는다(마디 처음→끝을 고르게 지나가게).
+        // 전에는 마디 '처음' 시각에 '가운데' 자리를 짚어 쉼 마디에 들어서자마자 세로줄이 가운데로 순간이동했다(11-13)
+        if (tk.whole) continue;
         let ax;
         try { ax = tk.note.getAbsoluteX(); } catch { continue; }
         // 음 시작은 .txt 시각 그대로, 쉼표·이어 끄는 조각은 박 수에 비례한 시각
@@ -400,7 +412,17 @@ export class ScoreView {
       if (!txt) continue;
       g.fillText(txt, (h.x0 + h.x1) / 2, lyY);
     }
-    anchors.sort((a, b) => a.ms - b.ms);
+    anchors.sort((a, b) => a.ms - b.ms || a.x - b.x);
+    // 같은 시각(3ms 안)에 자리가 여럿이면(앞 마디 끝·이 마디 처음·첫 음) 가장 오른쪽 하나만 —
+    // 여럿이면 그 순간 세로줄이 그 사이를 건너뛴다. 남긴 자리로 앞에서부터 이어 움직이므로 첫 음에 딱 맞춰 닿는다(11-13)
+    const merged = [];
+    for (const a of anchors) {
+      const p = merged[merged.length - 1];
+      if (p && a.ms - p.ms < 3) { p.x = Math.max(p.x, a.x); continue; }
+      merged.push({ ms: a.ms, x: a.x });
+    }
+    anchors.length = 0;
+    anchors.push(...merged);
     for (let i = 1; i < anchors.length; i++) if (anchors[i].x < anchors[i - 1].x) anchors[i].x = anchors[i - 1].x;
 
     const st0 = stave0;
@@ -453,19 +475,55 @@ export class ScoreView {
       const row = this.getRow(q);
       if (q === r) { g.fillStyle = COL.nowRow; g.fillRect(8, y0 + 4, W - 16, rp - 8); }
       g.drawImage(row.cv, 0, y0, W, rp);
-      // 음표 칠하기: 부른 음 = 맞음 초록 / 덜 맞음 주황, 지금 음 = 파랑
+      // 음표 칠하기(11-13 사용자): 맞게 부름 = 파랑 / 안 맞음 = 빨강(원래 음과 멀수록 짙게) + 부른 높이에 '인식된 음' /
+      // 목소리 없음 = 회색. 지금 부르는 음은 부르는 대로 바로 칠하고, 아직 소리가 없으면 대표 색
+      const last = sess.trail[sess.trail.length - 1];
       for (const [k, hs] of row.heads) {
         const n = this.song.notes[k];
-        let c = null;
-        if (t >= n.start && t < n.end) c = COL.cur;
-        else if (t >= n.end && scoring && n.type !== 'free') c = sess.noteFrac(n) >= 0.5 ? COL.hit : COL.miss;
+        let c = null, ghost = null;
+        const graded = scoring && n.type !== 'free';
+        if (t >= n.start && t < n.end) {
+          c = COL.cur;
+          if (graded && last && last.m && t - last.S < 200 && last.target === n.midi) {
+            c = last.hit ? COL.hit : redFor(last.m - n.midi);
+            if (!last.hit) ghost = last.m;
+          }
+        } else if (t >= n.end && graded) {
+          const med = sess.noteSung ? sess.noteSung(n) : null;
+          if (sess.noteFrac(n) >= 0.5) c = COL.hit;
+          else if (med == null) c = COL.unsung;
+          else { c = redFor(med - n.midi); ghost = med; }
+        }
         if (!c) continue;
-        g.fillStyle = c;
         for (const h of hs) {
           const cx = ((h.x0 + h.x1) / 2) * s, cy = y0 + h.y * s;
+          const rx = Math.max(4, ((h.x1 - h.x0) / 2) * s * 1.05), ry = 4.6 * s;
+          g.fillStyle = c;
           g.beginPath();
-          g.ellipse(cx, cy, Math.max(4, ((h.x1 - h.x0) / 2) * s * 1.05), 4.6 * s, -0.35, 0, Math.PI * 2);
+          g.ellipse(cx, cy, rx, ry, -0.35, 0, Math.PI * 2);
           g.fill();
+          // 인식된 음: 같은 자리 위·아래에 속이 빈 음표 머리 + 원래 음까지 가는 점선 (반음 반 넘게 벗어날 때만)
+          if (ghost != null && Math.abs(ghost - n.midi) >= 0.5) {
+            const gy = y0 + row.yForMidi(ghost) * s;
+            if (Math.abs(gy - cy) < ry * 0.8) continue;
+            // 바로 옆 칸이면 악보의 2도 화음처럼 옆으로 비켜 그려 겹치지 않게
+            const gx = Math.abs(gy - cy) < ry * 2.2 ? cx + rx * 1.7 : cx;
+            g.save();
+            g.strokeStyle = c;
+            g.lineWidth = Math.max(1, 1.2 * s);
+            g.setLineDash([3 * s, 3 * s]);
+            if (gx === cx) { g.beginPath(); g.moveTo(cx, cy + Math.sign(gy - cy) * ry); g.lineTo(cx, gy - Math.sign(gy - cy) * ry); g.stroke(); }
+            g.setLineDash([]);
+            g.lineWidth = Math.max(1.5, 2 * s);
+            g.globalAlpha = 0.9;
+            g.beginPath();
+            g.ellipse(gx, gy, rx, ry, -0.35, 0, Math.PI * 2);
+            g.stroke();
+            g.globalAlpha = 0.25;
+            g.fillStyle = c;
+            g.fill();
+            g.restore();
+          }
         }
       }
       if (q !== r) continue;
@@ -491,7 +549,6 @@ export class ScoreView {
       const cx = this.xAt(row, t) * s;
       g.fillStyle = COL.cursor;
       g.fillRect(cx - 1.25, y0 + (row.top - 22) * s, 2.5, (row.bottom - row.top + 44) * s);
-      const last = sess.trail[sess.trail.length - 1];
       if (scoring && sess.state === 'playing' && last && last.m && t - last.S < 400) {
         g.beginPath();
         g.arc(cx, y0 + row.yForMidi(last.m) * s, Math.max(4, 5 * s), 0, Math.PI * 2);

@@ -3,7 +3,7 @@
 import { settings, saveSettings, LEVELS, matches, fmtTime, el, toast, audioCtx } from './util.js';
 import { allSongs, getSong, getBlob, updateSong, deleteSong, deleteAll, importFiles, storageInfo, askPersist } from './library.js';
 import { parseUltraStar } from './ultrastar.js';
-import { Session, releaseMic } from './game.js';
+import { Session, releaseMic, listMics } from './game.js';
 import { TakePlayer } from './take.js';
 
 const app = document.getElementById('app');
@@ -404,6 +404,17 @@ function showSettings() {
 
   const echo = el('input', { type: 'checkbox', checked: s.echoCancel, onchange: (e) => saveSettings({ echoCancel: e.target.checked }) });
 
+  // 마이크 고르기 (11-13: 마이크를 켜면 블루투스 이어폰 음질이 떨어짐 → 폰 마이크를 고르면 나아질 수 있다)
+  const micSel = el('select', { class: 'select', 'aria-label': '마이크', onchange: (e) => { saveSettings({ micId: e.target.value }); releaseMic(); } });
+  const fillMics = async () => {
+    const mics = await listMics();
+    const cur = settings().micId;
+    micSel.replaceChildren(el('option', { value: '' }, '기기 기본'), ...mics.map((m) => el('option', { value: m.id }, m.label)));
+    if (cur && !mics.some((m) => m.id === cur)) micSel.append(el('option', { value: cur }, '전에 고른 마이크 (지금 없음)'));
+    micSel.value = cur;
+  };
+  fillMics();
+
   app.replaceChildren(el('div', { class: 'page' },
     el('header', { class: 'topbar' },
       el('button', { class: 'icon-btn', 'aria-label': '뒤로', html: ICON.back, onclick: () => history.back() }),
@@ -415,6 +426,8 @@ function showSettings() {
         seg('난이도 (음이 얼마나 벗어나도 맞게 칠지)', 'level', Object.entries(LEVELS).map(([k, v]) => [k, v.name])),
         range('마이크 감도', 'micGate', 0.003, 0.05, 0.001, (v) => (v <= 0.008 ? '예민' : v <= 0.02 ? '보통' : '둔함'), '작은 소리도 잡으려면 왼쪽, 주변 소리가 잡히면 오른쪽.'),
         el('label', { class: 'toggle' }, echo, el('span', {}, '에코 줄이기 — 이어폰 없이 스피커로 들을 때만 켜세요')),
+        el('label', { class: 'field col' }, el('span', {}, '마이크'), micSel,
+          el('small', { class: 'hint' }, '블루투스 이어폰으로 들을 때 마이크를 켜면 소리가 나빠지면 폰 마이크(이어폰이 아닌 것)를 골라 보세요. 이름이 안 보이면 한 번 불러 본 뒤 다시 여세요.')),
       ),
       el('section', {},
         el('h2', {}, '소리 지연'),
