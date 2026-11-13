@@ -57,14 +57,23 @@ async function loadSong(id) {
   const meta = await getSong(id);
   if (!meta) throw new Error('곡이 없습니다');
   const song = parseUltraStar(meta.txt);
-  if (decoded.id !== id || decoded.stamp !== meta.added + ':' + meta.audioName) {
-    decoded = { id: null, stamp: 0, buffer: null };
+  const stamp = meta.added + ':' + meta.audioName + ':' + (meta.vocalsName || '');
+  if (decoded.id !== id || decoded.stamp !== stamp) {
+    decoded = { id: null, stamp: 0, buffer: null, vocals: null };
     const blob = await getBlob(id + ':audio');
     if (!blob) throw new Error('곡의 소리 파일이 없습니다. 곡을 다시 넣어 주세요');
     const buffer = await audioCtx().decodeAudioData(await blob.arrayBuffer());
-    decoded = { id, stamp: meta.added + ':' + meta.audioName, buffer };
+    // 가이드 목소리 — 못 읽어도 노래는 된다(가이드 목소리만 없다)
+    let vocals = null;
+    if (meta.hasVocals) {
+      try {
+        const vb = await getBlob(id + ':vocals');
+        if (vb) vocals = await audioCtx().decodeAudioData(await vb.arrayBuffer());
+      } catch (e) { console.warn('가이드 목소리를 못 읽음', e); }
+    }
+    decoded = { id, stamp, buffer, vocals };
   }
-  return { meta, song, buffer: decoded.buffer };
+  return { meta, song, buffer: decoded.buffer, vocals: decoded.vocals };
 }
 
 // ---------- 부르기 ----------
@@ -72,8 +81,8 @@ async function showPlay(id) {
   loading('곡 불러오는 중…');
   let gone = false;
   cleanup = () => { gone = true; };
-  const { meta, song, buffer } = await loadSong(id);
-  const opts = {};
+  const { meta, song, buffer, vocals } = await loadSong(id);
+  const opts = { vocals };
   if (params.get('fakemic')) {
     // 시험용: 마이크 대신 목소리 파일을 흘린다
     const r = await fetch(params.get('fakemic'));

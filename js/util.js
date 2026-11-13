@@ -9,6 +9,7 @@ const DEFAULTS = {
   musicVol: 0.9,
   guide: false,         // 가이드 음
   guideVol: 0.35,
+  guideVoice: 0,        // 가이드 목소리 크기(0 = 끔, 1 = 원곡만큼)
   sort: 'title',        // title | recent | best
   favOnly: false,       // 목록에서 즐겨찾기만
   takeVoiceVol: 1.5,    // 내 노래 듣기: 내 목소리 크기

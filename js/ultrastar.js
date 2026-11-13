@@ -103,6 +103,7 @@ export function parseUltraStar(text) {
     title: meta.TITLE || '제목 없음',
     artist: meta.ARTIST || '',
     audio: meta.AUDIO || meta.MP3 || '',
+    vocals: meta.VOCALS || '',   // 가이드 목소리(목소리만 든 소리, 11-13)
     cover: meta.COVER || '',
     bpm,
     gap,

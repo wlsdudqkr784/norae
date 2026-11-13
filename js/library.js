@@ -62,6 +62,7 @@ export async function deleteSong(id) {
     t.objectStore('blobs').delete(id + ':audio');
     t.objectStore('blobs').delete(id + ':cover');
     t.objectStore('blobs').delete(id + ':take');
+    t.objectStore('blobs').delete(id + ':vocals');
   });
 }
 
@@ -76,10 +77,12 @@ export async function deleteAll() {
   });
 }
 
-async function saveSong(meta, audioBlob, coverBlob) {
+async function saveSong(meta, audioBlob, coverBlob, vocalsBlob) {
   await tx(['songs', 'blobs'], 'readwrite', (t) => {
     t.objectStore('songs').put(meta);
     t.objectStore('blobs').put(audioBlob, meta.id + ':audio');
+    if (vocalsBlob) t.objectStore('blobs').put(vocalsBlob, meta.id + ':vocals');
+    else t.objectStore('blobs').delete(meta.id + ':vocals');
     if (coverBlob) t.objectStore('blobs').put(coverBlob, meta.id + ':cover');
     else t.objectStore('blobs').delete(meta.id + ':cover');
   });
@@ -158,6 +161,9 @@ export async function importFiles(files, onProgress = () => {}) {
           else console.warn('악보 자료가 곡과 안 맞음', base(sItem.name), sj && sj.notes && sj.notes.length, song.notes.length);
         } catch (e) { console.warn('악보 자료를 못 읽음', base(sItem.name), e); }
       }
+      // 가이드 목소리(#VOCALS) — 이름이 꼭 같은 파일만(같은 이름 짐작으로 반주·원곡을 잘못 집지 않게). 반주와 같은 파일이면 안 씀
+      const vItem = song.vocals ? audios.find((p) => norm(base(p.name)) === norm(base(song.vocals)) && norm(dir(p.name)) === norm(dir(t.name))) : null;
+      const vocals = vItem && vItem !== audio ? vItem : null;
       const meta = {
         id,
         title: song.title,
@@ -175,8 +181,11 @@ export async function importFiles(files, onProgress = () => {}) {
         fav: !!old?.fav,
         take: old?.take || null, // 내 노래 녹음 정보(소리는 blobs 의 id:take)
         score,                   // 노래방 악보 자료(없으면 null)
+        hasVocals: !!vocals,     // 가이드 목소리가 있나(소리는 blobs 의 id:vocals)
+        vocalsName: vocals ? base(vocals.name) : '',
       };
-      await saveSong(meta, new Blob([audioBlob], { type: meta.audioType }), cover ? await cover.getBlob() : null);
+      await saveSong(meta, new Blob([audioBlob], { type: meta.audioType }), cover ? await cover.getBlob() : null,
+        vocals ? new Blob([await vocals.getBlob()], { type: guessType(vocals.name) }) : null);
       added.push(song.title);
     } catch (e) {
       failed.push({ name: base(t.name), why: e.message || String(e) });

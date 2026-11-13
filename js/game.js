@@ -76,6 +76,13 @@ export class Session {
     this.guideGain = this.ctx.createGain();
     this.guideGain.gain.value = settings().guideVol;
     this.guideGain.connect(this.ctx.destination);
+    // 가이드 목소리(분리한 원곡 목소리, 11-13) — 반주 위에 설정 guideVoice 크기로 섞는다. 없는 곡은 없음
+    this.vocals = opts.vocals || null;
+    this.voiceGain = this.ctx.createGain();
+    this.voiceGain.gain.value = this.vocals ? settings().guideVoice : 0;
+    this.voiceGain.connect(this.ctx.destination);
+    this.voiceSrc = null;
+    this.usedVoice = false;   // 가이드 목소리를 켜고 부른 판 — 최고 기록에 넣지 않는다
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0;
@@ -127,7 +134,8 @@ export class Session {
 
     this.playBtn = el('button', { class: 'ctl big', 'aria-label': '재생/멈춤', html: ICON.play, onclick: () => this.toggle() });
     this.loopBtn = el('button', { class: 'ctl', 'aria-label': '이 줄 반복', html: ICON.loop + '<span>줄 반복</span>', onclick: () => this.toggleLoop() });
-    this.guideBtn = el('button', { class: 'ctl' + (s.guide ? ' on' : ''), 'aria-label': '가이드 음', html: ICON.guide + '<span>가이드 음</span>', onclick: () => this.toggleGuide() });
+    this.guideBtn = el('button', { class: 'ctl', 'aria-label': '가이드', 'aria-expanded': 'false', html: ICON.guide + '<span>가이드</span>', onclick: () => this.toggleGuidePanel() });
+    this.guidePop = el('div', { class: 'guide-pop', role: 'dialog', 'aria-label': '가이드' });
     const controls = el('footer', { class: 'controls' },
       el('div', { class: 'prog-row' }, this.timeEl, this.prog, el('span', { class: 'time' }, fmtTime(this.endMs))),
       el('div', { class: 'btn-row' },
@@ -137,6 +145,7 @@ export class Session {
         el('button', { class: 'ctl', 'aria-label': '다음 줄', html: ICON.next + '<span>다음 줄</span>', onclick: () => this.jumpLine(1) }),
         this.guideBtn,
       ),
+      this.guidePop,
     );
     this.overlay = el('div', { class: 'overlay' });
     this.root.append(top, this.laneWrap, lyrics, controls, this.overlay);
@@ -144,6 +153,7 @@ export class Session {
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(this.laneWrap);
     this.resize();
+    this.showGuideOn();
     this.showReady();
   }
 
@@ -182,12 +192,11 @@ export class Session {
 
   showReady() {
     const s = settings();
-    const guide = el('input', { type: 'checkbox', checked: s.guide, onchange: (e) => { saveSettings({ guide: e.target.checked }); this.guideBtn.classList.toggle('on', e.target.checked); } });
     const card = el('div', { class: 'card' },
       el('h2', {}, this.meta.title),
       el('p', { class: 'muted' }, [this.meta.artist, fmtTime(this.endMs), this.meta.best ? `최고 ${this.meta.best.toLocaleString()}점` : ''].filter(Boolean).join(' · ')),
       el('div', { class: 'field' }, el('span', {}, '난이도'), this.levelPicker()),
-      el('label', { class: 'toggle' }, guide, el('span', {}, '가이드 음 (악보 음을 작게 들려줌)')),
+      ...this.guideItems(),
       el('button', { class: 'primary', onclick: () => this.begin() }, '시작'),
       el('p', { class: 'hint' }, '이어폰을 끼면 마이크가 노래 소리를 덜 듣습니다.'),
     );
@@ -292,6 +301,13 @@ export class Session {
       if (this.recDest) this.fakeSrc.connect(this.recDest);
       this.fakeSrc.start(when, fromMs / 1000);
     }
+    if (this.vocals && fromMs / 1000 < this.vocals.duration) {
+      this.voiceSrc = this.ctx.createBufferSource();
+      this.voiceSrc.buffer = this.vocals;
+      this.voiceSrc.connect(this.voiceGain);
+      this.voiceSrc.start(when, fromMs / 1000);
+      if (settings().guideVoice > 0) this.usedVoice = true;
+    }
     if (this.take && this.take.rec.state === 'paused') {
       const t = this.take;
       this.takeT = setTimeout(() => { try { if (t.rec.state === 'paused') t.rec.resume(); } catch (e) { console.warn('녹음 잇기 실패', e); } }, 60);
@@ -306,8 +322,8 @@ export class Session {
   }
 
   stopSources() {
-    for (const s of [this.src, this.fakeSrc]) { if (s) { try { s.stop(); } catch { /* 이미 멈춤 */ } s.disconnect(); } }
-    this.src = this.fakeSrc = null;
+    for (const s of [this.src, this.fakeSrc, this.voiceSrc]) { if (s) { try { s.stop(); } catch { /* 이미 멈춤 */ } s.disconnect(); } }
+    this.src = this.fakeSrc = this.voiceSrc = null;
     for (const o of this.guideNodes) { try { o.stop(); } catch { /* 이미 멈춤 */ } }
     this.guideNodes = [];
   }
@@ -348,6 +364,7 @@ export class Session {
   restart() {
     this.closeTake();
     this.dropTake();
+    this.usedVoice = false;
     for (const n of this.song.notes) { n.hit = 0; n.segs = []; }
     this.lineScores.fill(null);
     this.skipped.clear();
@@ -425,13 +442,60 @@ export class Session {
     toast(`이 줄 반복: "${this.song.lines[i].syllables.map((s) => s.text + (s.space ? ' ' : '')).join('').trim().slice(0, 18)}"`);
   }
 
-  toggleGuide() {
-    const on = !settings().guide;
+  // ---------- 가이드 (목소리 크기 · 악보 음) ----------
+  guideItems() {
+    const s = settings();
+    const items = [];
+    if (this.vocals) {
+      const out = el('span', { class: 'val' }, s.guideVoice > 0 ? Math.round(s.guideVoice * 100) + '%' : '끔');
+      const inp = el('input', { type: 'range', min: '0', max: '100', step: '5', value: String(Math.round(s.guideVoice * 100)), 'aria-label': '가이드 목소리 크기' });
+      inp.addEventListener('input', () => {
+        const v = Number(inp.value) / 100;
+        out.textContent = v > 0 ? inp.value + '%' : '끔';
+        this.setGuideVoice(v);
+      });
+      items.push(el('label', { class: 'field col' }, el('span', {}, '가이드 목소리', out), inp));
+    }
+    const tone = el('input', { type: 'checkbox', checked: s.guide, onchange: (e) => this.toggleGuide(e.target.checked) });
+    items.push(el('label', { class: 'toggle' }, tone, el('span', {}, '가이드 음 (악보 음을 삐 소리로)')));
+    if (this.vocals) items.push(el('p', { class: 'hint' }, '가이드 목소리를 켜고 부른 판은 최고 기록에 넣지 않아요'));
+    return items;
+  }
+
+  setGuideVoice(v) {
+    saveSettings({ guideVoice: v });
+    if (this.vocals) this.voiceGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.03);
+    if (v > 0 && this.state === 'playing') this.usedVoice = true;
+    this.showGuideOn();
+  }
+
+  showGuideOn() {
+    const s = settings();
+    this.guideBtn.classList.toggle('on', s.guide || (!!this.vocals && s.guideVoice > 0));
+  }
+
+  toggleGuidePanel(open) {
+    const show = open ?? !this.guidePop.classList.contains('show');
+    this.guideBtn.setAttribute('aria-expanded', String(show));
+    if (!show) {
+      this.guidePop.classList.remove('show');
+      document.removeEventListener('pointerdown', this.onPopOut, true);
+      return;
+    }
+    this.guidePop.replaceChildren(...this.guideItems());
+    this.guidePop.classList.add('show');
+    // 창 밖을 누르면 닫는다(단추를 다시 눌러도 닫힌다)
+    this.onPopOut = this.onPopOut || ((e) => {
+      if (!this.guidePop.contains(e.target) && !this.guideBtn.contains(e.target)) this.toggleGuidePanel(false);
+    });
+    document.addEventListener('pointerdown', this.onPopOut, true);
+  }
+
+  toggleGuide(on = !settings().guide) {
     saveSettings({ guide: on });
-    this.guideBtn.classList.toggle('on', on);
+    this.showGuideOn();
     if (!on) { for (const o of this.guideNodes) { try { o.stop(); } catch { /* 이미 멈춤 */ } } this.guideNodes = []; }
     else this.guideUntil = this.pos();
-    toast(on ? '가이드 음 켬' : '가이드 음 끔');
   }
 
   skipGap() {
@@ -717,6 +781,8 @@ export class Session {
       this.fill(slot[(i + 1) % 2], L[i + 1]);
       slot[i % 2].classList.add('now');
       slot[(i + 1) % 2].classList.remove('now');
+      for (const b of slot) { delete b.dataset.cnt; b.classList.remove('c1', 'c2'); }
+      this._cnt = 0;
     }
     const line = L[i];
     if (line) {
@@ -728,15 +794,42 @@ export class Session {
         if (sp && sp._q !== q) { sp._q = q; sp.style.setProperty('--p', q + '%'); }
       });
     }
+    // 들어가기 숫자(11-13 사용자): 앞 줄과 2.5박 넘게 쉬는 줄(첫 줄 포함)만, 남은 박이 3 이하일 때
+    let cnt = 0;
+    if (line && t < line.start && this.state === 'playing') {
+      const bm = this.beatMs(i);
+      const prevEnd = i > 0 ? L[i - 1].end : -Infinity;
+      const left = (line.start - t) / bm;
+      if (line.start - prevEnd >= bm * 2.5 && left <= 3) cnt = Math.max(1, Math.ceil(left - 0.02));
+    }
+    if (cnt !== this._cnt) {
+      this._cnt = cnt;
+      const box = this.lyrNow;
+      if (box) {
+        if (cnt) {
+          box.dataset.cnt = String(cnt);
+          // 숫자가 바뀔 때마다 톡 튀게: 같은 모양의 애니메이션 둘을 번갈아 건다
+          box.classList.toggle('c1', cnt % 2 === 1);
+          box.classList.toggle('c2', cnt % 2 === 0);
+        } else { delete box.dataset.cnt; box.classList.remove('c1', 'c2'); }
+      }
+    }
     // 기다림 표시·건너뛰기
     const nextNote = line && t < line.start ? line.start : null;
     const wait = nextNote != null ? nextNote - t : 0;
-    if (wait > 1200) {
+    if (wait > 1200 && !cnt) {
       const sec = Math.ceil(wait / 1000);
       if (this._wait !== sec) { this._wait = sec; this.waitEl.textContent = i === 0 ? `시작까지 ${sec}초` : `다음 줄까지 ${sec}초`; }
       this.waitEl.classList.add('show');
     } else if (this._wait !== 0) { this._wait = 0; this.waitEl.classList.remove('show'); }
     this.skipBtn.classList.toggle('show', this.state === 'playing' && wait > 5000);
+  }
+
+  // 한 박(4분음표) ms — 노래방 악보 자료가 있으면 그 줄의 빠르기, 없으면 UltraStar 보통 셈(4칸 = 한 박)
+  beatMs(i) {
+    const L = this.meta.score && this.meta.score.lines && this.meta.score.lines[i];
+    if (L && L.spb > 0) return L.spb * 1000;
+    return 60000 / Math.max(1, this.song.bpm);
   }
 
   fill(box, line) {
@@ -772,7 +865,7 @@ export class Session {
     this.lockScreen(false);
     this.playBtn.innerHTML = ICON.play;
     const sc = this.score();
-    const saved = this.micOk && !this.practiced;
+    const saved = this.micOk && !this.practiced && !this.usedVoice;
     const isBest = saved && sc > (this.meta.best || 0);
     const take = this.take;
     this.take = null;
@@ -868,7 +961,7 @@ export class Session {
       el('p', { class: 'muted' }, this.meta.title),
       el('div', { class: 'big-score' }, this.micOk ? sc.toLocaleString() : '—', el('small', {}, this.micOk ? '점' : '')),
       el('p', { class: 'word' }, word, isBest ? el('span', { class: 'badge' }, '최고 기록') : null),
-      !saved && this.micOk ? el('p', { class: 'hint' }, '줄 반복·건너뛰기를 써서 최고 기록에는 넣지 않았어요') : null,
+      !saved && this.micOk ? el('p', { class: 'hint' }, this.usedVoice && !this.practiced ? '가이드 목소리를 켜고 불러서 최고 기록에는 넣지 않았어요' : '줄 반복·건너뛰기를 써서 최고 기록에는 넣지 않았어요') : null,
       nSkip && this.micOk ? el('p', { class: 'hint' }, `건너뛴 ${nSkip}줄은 회색 · 부른 줄만 보면 ${Math.round(sungPct * 100)}%`) : null,
       bars,
       el('div', { class: 'pick-row' }, pickInfo, pickBtn),
@@ -906,7 +999,8 @@ export class Session {
     this.lockScreen(false);
     try { this.recDest?.disconnect(); } catch { /* 무시 */ }
     try { this.micNode?.disconnect(); } catch { /* 무시 */ }
-    try { this.music.disconnect(); this.guideGain.disconnect(); this.analyser.disconnect(); } catch { /* 무시 */ }
+    try { this.music.disconnect(); this.guideGain.disconnect(); this.voiceGain.disconnect(); this.analyser.disconnect(); } catch { /* 무시 */ }
+    if (this.onPopOut) document.removeEventListener('pointerdown', this.onPopOut, true);
     this.ro?.disconnect();
     document.removeEventListener('visibilitychange', this.onVis);
     clearTimeout(this.rateT);
