@@ -68,9 +68,11 @@ export class ScoreView {
     this.keyName = KEYNAME[f];
     this.names = f >= 0 ? SHARP : FLAT;
     // 남자 목소리는 악보보다 한 옥타브 낮게 부른다 → 높은음자리표 밑 8 (8vb) 로 적는다
-    const mids = sj.notes.map((n) => n.midi).sort((a, b) => a - b);
-    const med = mids[mids.length >> 1];
-    this.disp = med < 60 ? 12 : med > 84 ? -12 : 0;
+    // ★ 11-21 '일생 일작': 가운데 음이 60 을 살짝 넘어 옮기지 않았는데, 많은 음이 오선 밑으로 내려가 가사를 덮었다.
+    //   → 오선 밖(덧줄 두 개 넘게: D4 밑 · A5 위)으로 나가는 음이 가장 적은 옥타브를 고른다. 같으면 안 옮긴다.
+    const mids = sj.notes.map((n) => n.midi);
+    const off = (d) => mids.filter((m) => m + d < 62 || m + d > 81).length;
+    this.disp = [0, 12, -12].reduce((best, d) => (off(d) < off(best) ? d : best), 0);
     this.clefAnn = this.disp === 12 ? '8vb' : this.disp === -12 ? '8va' : undefined;
     this.buildOccurrences();
     this.layoutKey = '';
@@ -400,7 +402,10 @@ export class ScoreView {
       }
     }
     // 가사(음표 밑)
-    const lyY = stave0 ? stave0.getYForLine(4) + 34 : 110;
+    // 가사 줄은 이 줄에서 가장 낮은 음표보다 밑에 (덮이지 않게, 11-21) — 줄 높이(ROW_H) 안에서만
+    let lowY = -Infinity;
+    for (const [, hs] of heads) for (const h of hs) lowY = Math.max(lowY, h.y);
+    const lyY = Math.min(ROW_H - 3, Math.max(stave0 ? stave0.getYForLine(4) + 34 : 110, lowY + 20));
     g.fillStyle = COL.lyric;
     g.textAlign = 'center';
     g.textBaseline = 'alphabetic';

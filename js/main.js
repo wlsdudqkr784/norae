@@ -6,7 +6,6 @@ import { parseUltraStar } from './ultrastar.js';
 import { Session, releaseMic, listMics } from './game.js';
 import { TakePlayer } from './take.js';
 import { MicTest } from './mictest.js';
-import { VOICES } from './pitch.js';
 import { CALIB_TITLE, CALIB_LINES, isCalibSong } from './calib.js';
 
 // 여기까지 왔으면 모든 파일을 제대로 읽은 것 — index.html 의 '안 열림' 단추가 뜨지 않게(11-14)
@@ -437,11 +436,7 @@ function showSettings() {
   };
   fillMics();
 
-  // 목소리 기준 (11-14 사용자: 남자 낮은 도를 못 잡음 → 남자·여자 나눔). 바꾸면 시험 중인 마이크 시험도 새 기준으로
-  const voiceSeg = seg('목소리 기준 (잡을 음 범위)', 'voice', Object.entries(VOICES).map(([k, v]) => [k, v.name]));
-  voiceSeg.addEventListener('click', (e) => {
-    if (e.target.closest('button') && micTest.on) { micTest.stop(); micTest.start(); }
-  });
+  // 목소리 기준(남자·여자)은 11-21 사용자 결정으로 없앴다 — 한 넓은 범위로 잡는다(pitch.js RANGE)
 
   app.replaceChildren(el('div', { class: 'page' },
     el('header', { class: 'topbar' },
@@ -452,8 +447,6 @@ function showSettings() {
       el('section', {},
         el('h2', {}, '채점'),
         seg('난이도 (음이 얼마나 벗어나도 맞게 칠지)', 'level', Object.entries(LEVELS).map(([k, v]) => [k, v.name])),
-        voiceSeg,
-        el('small', { class: 'hint' }, '남자: 솔1(49Hz)까지 낮게 잡습니다. 여자: 100Hz(솔#2) 아래는 보지 않아 한 옥타브 낮게 잘못 잡는 일이 줄어듭니다.'),
         range('마이크 감도', 'micGate', 0.003, 0.05, 0.001, (v) => (v <= 0.008 ? '예민' : v <= 0.02 ? '보통' : '둔함'), '작은 소리도 잡으려면 왼쪽, 주변 소리가 잡히면 오른쪽.'),
         el('label', { class: 'toggle' }, echo, el('span', {}, '에코 줄이기 — 이어폰 없이 스피커로 들을 때만 켜세요')),
         el('label', { class: 'field col' }, el('span', {}, '마이크'), micSel,

@@ -1,12 +1,11 @@
 // 마이크 시험 (11-13) — 노래 없이 소리를 내면 앱이 듣는 음 이름·소리 크기·지난 6초 음높이를 바로 보여 준다.
 // 부르기 화면과 같은 길(getMic · PitchDetector · 설정의 감도)로 들어서, 여기서 맞게 잡히면 부르기에서도 잡힌다.
 // 함께 보이는 것: 쓰는 마이크 이름과 표본 빠르기(Hz) — 블루투스 통화 방식이면 8000·16000 처럼 낮게 나온다.
-import { PitchDetector, freqToMidi, VOICES } from './pitch.js';
+import { PitchDetector, freqToMidi, midiToFreq, RANGE, RangeTracker, noteName } from './pitch.js';
 import { settings, el, audioCtx } from './util.js';
 import { getMic, releaseMic } from './game.js';
 
-const NAMES = ['도', '도#', '레', '레#', '미', '파', '파#', '솔', '솔#', '라', '라#', '시'];
-export const noteName = (m) => { const r = Math.round(m); return NAMES[((r % 12) + 12) % 12] + (Math.floor(r / 12) - 1); };
+export { noteName };   // 예전처럼 여기서도 가져갈 수 있게 (이름 함수는 pitch.js 로 옮김 11-21)
 
 export class MicTest {
   constructor() {
@@ -34,9 +33,10 @@ export class MicTest {
       this.an.fftSize = 2048;
       this.node.connect(this.an);
       this.buf = new Float32Array(this.an.fftSize);
-      const vc = VOICES[s.voice] || VOICES.both;
-      this.det = new PitchDetector(ctx.sampleRate, this.an.fftSize, vc);
-      const lowName = noteName(freqToMidi(this.det.minHz)), highName = noteName(freqToMidi(vc.max));
+      this.det = new PitchDetector(ctx.sampleRate, this.an.fftSize);
+      const lowName = noteName(freqToMidi(this.det.minHz)), highName = noteName(freqToMidi(RANGE.max));
+      this.range = new RangeTracker();   // 11-21: 지금까지 잡힌 가장 낮은·높은 음
+      this.rangeEl = el('p', { class: 'mt-range' }, '가장 낮은 음 — · 가장 높은 음 —');
       const tr = this.stream.getAudioTracks()[0];
       const st = (tr && tr.getSettings) ? tr.getSettings() : {};
       const rate = st.sampleRate ? `${st.sampleRate}Hz` : '표본 빠르기 모름';
@@ -50,7 +50,8 @@ export class MicTest {
         el('div', { class: 'mt-level', 'aria-hidden': 'true' }, this.lvBar, this.gateMark),
         this.cv,
         el('p', { class: 'hint' }, `쓰는 마이크: ${(tr && tr.label) || '이름 모름'} · ${rate}`),
-        el('p', { class: 'hint' }, `목소리 기준 '${vc.name}': ${lowName}(${Math.round(this.det.minHz)}Hz) ~ ${highName} 사이만 잡습니다.`),
+        this.rangeEl,
+        el('p', { class: 'hint' }, `${lowName}(${Math.round(this.det.minHz)}Hz) ~ ${highName} 사이를 잡습니다 (전기 웅 소리 60Hz 근처는 버림). 0.3초 넘게 낸 음만 가장 낮은·높은 음에 셉니다.`),
         el('p', { class: 'hint' }, '"아~" 하고 음을 올렸다 내려 보세요. 음 이름이 따라 바뀌면 마이크는 괜찮습니다. 막대가 세로 금(감도)을 못 넘으면 소리가 작다고 보고 무시합니다.'),
       );
       this.hist = [];
@@ -75,6 +76,13 @@ export class MicTest {
     this.lvBar.style.width = pos(r.rms) + '%';
     this.gateMark.style.left = pos(gate) + '%';
     const m = r.freq > 0 ? freqToMidi(r.freq) : 0;
+    this.range.feed(m, r.clarity, now);
+    const rg = this.range.low == null ? null : this.range;
+    if (rg && (rg.low !== this.shownLow || rg.high !== this.shownHigh)) {
+      this.shownLow = rg.low; this.shownHigh = rg.high;
+      const f = (x) => `${noteName(x)} (${Math.round(midiToFreq(x))}Hz)`;
+      this.rangeEl.textContent = `가장 낮은 음 ${f(rg.low)} · 가장 높은 음 ${f(rg.high)}`;
+    }
     if (m) {
       this.nameEl.textContent = noteName(m);
       this.hzEl.textContent = Math.round(r.freq) + 'Hz';

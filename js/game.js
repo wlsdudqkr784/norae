@@ -1,5 +1,5 @@
 // 부르기 화면 — 소리 재생, 마이크 음높이, 채점, 그리기.
-import { PitchDetector, freqToMidi, midiToFreq, foldOctave, VOICES } from './pitch.js';
+import { PitchDetector, freqToMidi, midiToFreq, foldOctave, RangeTracker, noteName } from './pitch.js';
 import { settings, saveSettings, LEVELS, fmtTime, el, toast, audioCtx } from './util.js';
 import { updateSong, putBlob } from './library.js';
 import { TakePlayer } from './take.js';
@@ -81,6 +81,7 @@ export class Session {
     this.view = { center: 0, span: 14, init: false };
     this.lineScores = new Array(song.lines.length).fill(null);
     this.skipped = new Set();  // 옮기기로 건너뛴 줄 (결과에서 회색으로)
+    this.range = new RangeTracker();   // 부른 음역 (11-21 사용자) — 결과 화면에 가장 낮은·높은 음
     this.ratedUntil = -1;
     this.lastDetect = 0;
     this.shownScore = 0;
@@ -121,7 +122,7 @@ export class Session {
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0;
     this.buf = new Float32Array(this.analyser.fftSize);
-    this.detector = new PitchDetector(this.ctx.sampleRate, this.analyser.fftSize, VOICES[settings().voice] || VOICES.both);
+    this.detector = new PitchDetector(this.ctx.sampleRate, this.analyser.fftSize);
 
     this.build();
     this.frame = this.frame.bind(this);
@@ -412,6 +413,7 @@ export class Session {
     for (const n of this.song.notes) { n.hit = 0; n.segs = []; n.sung = []; }
     this.lineScores.fill(null);
     this.skipped.clear();
+    this.range = new RangeTracker();
     this.ratedUntil = -1;
     this.trail = [];
     this.practiced = false;
@@ -605,6 +607,7 @@ export class Session {
     if (prev == null || S <= prev) return;
     const dt = Math.min(60, S - prev);
     const midi = r.freq > 0 ? freqToMidi(r.freq) : 0;
+    this.range.feed(midi, r.clarity, S);   // 접기 전 실제 높이로
     if (this.calibRec) this.calibRec.push({ S, m: midi });
     const note = this.noteAt(S);
     let hit = false, shown = midi;
@@ -1084,6 +1087,7 @@ export class Session {
       el('p', { class: 'word' }, word, isBest ? el('span', { class: 'badge' }, '최고 기록') : null),
       !saved && this.micOk ? el('p', { class: 'hint' }, this.usedVoice && !this.practiced ? '가이드 목소리를 켜고 불러서 최고 기록에는 넣지 않았어요' : '줄 반복·옮기기를 써서 최고 기록에는 넣지 않았어요') : null,
       nSkip && this.micOk ? el('p', { class: 'hint' }, `건너뛴 ${nSkip}줄은 회색 · 부른 줄만 보면 ${Math.round(sungPct * 100)}%`) : null,
+      this.micOk ? this.rangeLine() : null,
       bars,
       el('div', { class: 'pick-row' }, pickInfo, pickBtn),
       // 단추 위계: 다시 부르기만 강조 · 내 노래 듣기는 보조 · 목록으로는 글자 단추
@@ -1091,6 +1095,14 @@ export class Session {
       this.meta.take ? el('button', { class: 'secondary', onclick: () => this.showTake() }, '내 노래 듣기') : null,
       el('button', { class: 'text-btn', onclick: () => this.quit() }, '목록으로'),
     ));
+  }
+
+  // 부른 음역 한 줄 (11-21 사용자): 0.3초 넘게 낸 음 중 가장 낮은·높은 음
+  rangeLine() {
+    const r = this.range.result();
+    const hz = (m) => Math.round(midiToFreq(m));
+    if (!r) return el('p', { class: 'hint range' }, '부른 음역: 또렷하게 길게 낸 음이 없어 못 쟀어요');
+    return el('p', { class: 'range' }, '부른 음역 ', el('b', {}, `${noteName(r.low)} (${hz(r.low)}Hz)`), ' ~ ', el('b', {}, `${noteName(r.high)} (${hz(r.high)}Hz)`));
   }
 
   practiceLine(i) {

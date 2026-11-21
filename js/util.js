@@ -2,7 +2,6 @@
 
 const DEFAULTS = {
   level: 'normal',      // easy | normal | hard
-  voice: 'both',        // 목소리 기준 both | male | female (pitch.js VOICES — 잡는 음 범위)
   outLatency: -1,       // 이어폰/스피커 지연 ms (-1 = 기기가 알려 주는 값)
   micLatency: 40,       // 마이크 지연 ms
   micGate: 0.012,       // 이보다 작은 소리는 무시
