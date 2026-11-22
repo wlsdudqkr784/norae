@@ -32,24 +32,49 @@ export function redFor(dev) {
 
 // 셋잇단 길이(박): 셋잇단 2분·4분·8분·16분. 적을 때는 보통 음표로 적고 '3' 묶음(Tuplet)이 길이를 2/3 로 줄인다
 const TRIP = [[4 / 3, 'h'], [2 / 3, 'q'], [1 / 3, '8'], [1 / 6, '16']];
-const isTriplet = (len) => Math.abs(len * 3 - Math.round(len * 3)) < 0.02 && Math.abs(len * 8 - Math.round(len * 8)) > 0.05;
+// ★ 11-22 감사: 전에는 len*3 이 정수인 것만 셋잇단으로 봐서 1/6박(16분 셋잇단)이 32분음표로, 5/6박이 '8분 점+32분'(0.875박)으로 적혔다.
+//   → 1/6박 단위(len*6 정수)면 셋잇단(보통 음표 길이 len*8 정수는 빼고)
+const isTriplet = (len) => Math.abs(len * 6 - Math.round(len * 6)) < 0.02 && Math.abs(len * 8 - Math.round(len * 8)) > 0.05;
+const warned = new Set();
 
-// 길이(박) → [[박, VexFlow 길이, 점, 셋잇단?]]
-function split(len) {
-  const out = [];
+function splitTrip(len, out) {
   let rem = len;
-  if (isTriplet(len)) {
-    while (rem > 0.1) {
-      const d = TRIP.find(([v]) => v <= rem + 0.02) || TRIP[TRIP.length - 1];
-      out.push([d[0], d[1], 0, true]);
-      rem -= d[0];
-    }
-    return out;
+  while (rem > 0.1) {
+    const d = TRIP.find(([v]) => v <= rem + 0.02) || TRIP[TRIP.length - 1];
+    out.push([d[0], d[1], 0, true]);
+    rem -= d[0];
   }
+  return rem;
+}
+function splitNormal(len, out) {
+  let rem = len;
   while (rem > 0.06) {
     const d = DURS.find(([v]) => v <= rem + 0.02) || DURS[DURS.length - 1];
     out.push([d[0], d[1], d[2], false]);
     rem -= d[0];
+  }
+  return rem;
+}
+
+// 길이(박) → [[박, VexFlow 길이, 점, 셋잇단?]]
+export function split(len) {
+  const out = [];
+  let rem;
+  if (isTriplet(len)) rem = splitTrip(len, out);
+  else {
+    // 1/12박 칸 위의 '보통 + 셋잇단' 섞인 길이(예: 5/12 = 1/4 + 1/6, 7/12 = 1/4 + 1/3): 보통 부분(3칸 배수)을 먼저, 남은 짝수 칸을 셋잇단으로
+    const u = Math.round(len * 12);
+    let n3 = -1;
+    if (Math.abs(len * 12 - u) < 0.03 && u % 3 !== 0) {
+      for (let x = u - (u % 3); x > 0; x -= 3) if ((u - x) % 2 === 0) { n3 = x; break; }
+    }
+    if (n3 > 0) { splitNormal(n3 / 12, out); rem = splitTrip((u - n3) / 12, out); }
+    else rem = splitNormal(len, out);
+  }
+  // 남는 길이는 조용히 버리지 않고 남긴다(같은 길이는 한 번만)
+  if (Math.abs(rem) > 0.03) {
+    const key = len.toFixed(3);
+    if (!warned.has(key)) { warned.add(key); console.warn('악보: 음표로 다 못 적은 길이', { len, rem }); }
   }
   return out;
 }
@@ -94,6 +119,19 @@ export class ScoreView {
     return r;
   }
 
+  // 음 끝(b)이 걸치는 마지막 마디: 시작이 b 보다 '확실히' 앞인 마지막 마디.
+  // ★ 11-22 감사: 전에는 mIdx(b - EPS) 라 EPS 가 서로 지워져, 마디 끝에 딱 맞춰 끝나는 음이 다음 마디에
+  //   길이 0 조각(가짜 이음줄·가짜 마디)을 만들었다.
+  mIdxEnd(beat) {
+    const M = this.M;
+    let lo = 0, hi = M.length - 1, r = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (M[mid].beat < beat - EPS) { r = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return r;
+  }
+
   // 부른 순서대로 마디를 늘어놓는다(도돌이로 다시 부르면 그 마디가 다시 나온다).
   // ★ 11-13 둘째(사용자): 전주·간주·쉬는 마디도 빼지 않는다 — 비는 시간만큼 쉼 마디를 넣어 세로줄이 계속 흐르게.
   // 시각은 '음이 시작하는 시각(.txt)' 만 믿고, 그 사이는 박 수에 비례해 나눈다 → 4박 쉼은 4박만큼 천천히 지나간다.
@@ -109,18 +147,28 @@ export class ScoreView {
     let prevBeat = -Infinity;
     this.sj.notes.forEach((n, k) => {
       const a = n.beat, b = n.beat + Math.max(n.dur, 0.05);
-      const m0 = this.mIdx(a), m1 = this.mIdx(b - EPS);
+      const m0 = this.mIdx(a), m1 = Math.max(m0, this.mIdxEnd(b));
+      // 이 음이 걸치는 마디 조각들. 0.03박 안 되는 조각은 버린다(그려도 안 보이고 가짜 이음줄·가짜 마디만 만든다).
+      // 다 버려지면(아주 짧은 음이 마디 줄에 걸침) 가장 긴 조각 하나는 남긴다 — 음표·가사가 사라지지 않게
+      let cand = [];
       for (let m = m0; m <= m1; m++) {
-        if (this.M[m].len < 0.05) continue;   // 길이 0 마디(악보 읽기가 만든 빈 마디 — 476 106마디)
-        let o = occ[occ.length - 1];
-        const back = m === m0 && a < prevBeat - EPS;
-        if (!o || o.m !== m || back) o = push(m, n.line);
-        o.lastLine = n.line;
-        const ms = o.beat, me = ms + o.len;
-        const from = Math.max(a, ms);
-        o.segs.push({ k, from, to: Math.min(b, me), tieIn: m > m0 && noteAt[k] != null, tieOut: m < m1 });
-        if (noteAt[k] == null) noteAt[k] = [o, from];
+        const M = this.M[m];
+        if (M.len < 0.05) continue;   // 길이 0 마디(악보 읽기가 만든 빈 마디 — 476 106마디)
+        const from = Math.max(a, M.beat), to = Math.min(b, M.beat + M.len);
+        cand.push({ m, from, to });
       }
+      const real = cand.filter((c) => c.to - c.from >= 0.03);
+      if (real.length) cand = real;
+      else if (cand.length) cand = [cand.reduce((x, y) => (y.to - y.from > x.to - x.from ? y : x))];
+      cand.forEach((c, i) => {
+        let o = occ[occ.length - 1];
+        const back = i === 0 && a < prevBeat - EPS;
+        if (!o || o.m !== c.m || back) o = push(c.m, n.line);
+        o.lastLine = n.line;
+        // 이음줄은 실제로 넣은 조각 사이에만(사이의 길이 0 마디를 건너뛰어도 끊기지 않게)
+        o.segs.push({ k, from: c.from, to: c.to, tieIn: i > 0, tieOut: i < cand.length - 1 });
+        if (noteAt[k] == null) noteAt[k] = [o, c.from];
+      });
       prevBeat = a;
     });
     // 마디마다 대강의 시각(줄의 박 → 초) — 빈 시간을 재는 데만 쓴다

@@ -56,6 +56,11 @@ export async function listMics() {
 export function releaseMic() {
   if (micCache) { micCache.stream.getTracks().forEach((t) => t.stop()); micCache = null; }
 }
+// 화면을 떠난 뒤에 늦게 도착한 마이크 줄기를 끈다(11-22 감사 — 떠날 때의 releaseMic 은 아직 빈 캐시를 지나갔다)
+function dropStream(stream) {
+  if (micCache && micCache.stream === stream) releaseMic();
+  else { try { stream.getTracks().forEach((t) => t.stop()); } catch (e) { console.warn('늦은 마이크 끄기 실패', e); } }
+}
 
 export class Session {
   // opts: {fakeMic: AudioBuffer} — 시험용(목소리 파일을 마이크 대신)
@@ -118,6 +123,9 @@ export class Session {
     this.voiceGain.connect(this.ctx.destination);
     this.voiceSrc = null;
     this.usedVoice = false;   // 가이드 목소리를 켜고 부른 판 — 최고 기록에 넣지 않는다
+    this.usedGuide = false;   // 가이드 음을 켜고 부른 판 — 마찬가지(11-22 감사)
+    this.micLost = false;     // 부르는 도중 마이크가 끊김(11-22 감사) — 다시 열면 false
+    this.micBroke = false;    // 이번 판에 한 번이라도 끊김
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0;
@@ -129,6 +137,15 @@ export class Session {
     this.raf = requestAnimationFrame(this.frame);
     this.onVis = () => { if (document.hidden && this.state === 'playing') this.pause(); };
     document.addEventListener('visibilitychange', this.onVis);
+    // ★ 11-22 감사: 소리 장치가 멈추면(iOS 의 전화·잠금·다른 앱 — 'suspended'/'interrupted') 시각이 멈춰 화면이 언다 →
+    //   멈춤 창을 띄워 '계속' 을 누르게 한다(누르면 play() 가 깨운다)
+    this.onCtxState = () => {
+      if (this.destroyed || this.ctx.state === 'running' || this.state !== 'playing') return;
+      console.warn('소리 장치가 멈춤', this.ctx.state);
+      this.pause();
+      toast('소리가 멈췄어요 — 계속을 누르면 이어 갑니다');
+    };
+    try { this.ctx.addEventListener('statechange', this.onCtxState); } catch (e) { console.warn('소리 장치 상태를 못 들음', e); }
   }
 
   weight(n) {
@@ -249,8 +266,11 @@ export class Session {
 
   async begin() {
     this.showOverlay(el('div', { class: 'card' }, el('p', {}, '마이크 준비 중…')));
-    try { await this.ctx.resume(); } catch { /* 아래 재생에서 다시 */ }
+    try { await this.ctx.resume(); } catch (e) { console.warn('소리 장치 깨우기 실패 — 재생에서 다시', e); }
+    // ★ 11-22 감사: 기다리는 사이 화면을 떠났으면(뒤로 가기) 여기서 멈춘다 — 전에는 마이크·녹음·화면 켜짐이 목록에서도 남았다
+    if (this.destroyed) return;
     this.micOk = false;
+    this.micLost = false;
     this.recStream = null; // 내 노래 녹음에 쓸 소리 줄기
     if (this.opts.fakeMic) {
       this.micOk = true;
@@ -258,11 +278,11 @@ export class Session {
     } else {
       try {
         const stream = await getMic(settings().echoCancel, settings().micId);
-        this.micNode = this.ctx.createMediaStreamSource(stream);
-        this.micNode.connect(this.analyser);
+        if (this.destroyed) { dropStream(stream); return; }
+        this.useMic(stream);
         this.micOk = true;
-        this.recStream = stream;
       } catch (e) {
+        if (this.destroyed) return;
         toast('마이크를 못 써서 점수 없이 재생합니다');
         console.warn('마이크 실패', e);
       }
@@ -270,6 +290,95 @@ export class Session {
     this.showOverlay(null);
     this.play(this.offsetMs);
     this.startTake();
+  }
+
+  // ---------- 마이크 끊김 (11-22 감사) ----------
+  // 블루투스 이어폰이 끊기거나 다른 앱이 마이크를 가져가면 줄기가 끝난다. 전에는 아무 표시 없이 남은 음이 다 '안 부름' 이 되고,
+  // 반쯤 빈 녹음이 전의 '내 노래' 를 덮어썼다 → 멈추고 알린다. 이번 판은 연습으로 쳐서 녹음·최고 기록에 넣지 않는다. '계속' 이면 다시 연다
+  useMic(stream) {
+    try { this.micNode?.disconnect(); } catch (e) { console.warn('옛 마이크 끊기 실패', e); }
+    this.micNode = this.ctx.createMediaStreamSource(stream);
+    this.micNode.connect(this.analyser);
+    this.recStream = stream;
+    this.watchMic(stream);
+  }
+
+  watchMic(stream) {
+    this.unwatchMic();
+    const tr = stream.getAudioTracks()[0];
+    if (!tr) return;
+    this.micTrack = tr;
+    tr.onended = () => this.onMicLost('끝남');
+    // 'mute' 는 잠깐 났다 풀리기도 한다(전화·다른 앱) → 부르는 중에 1초 넘게 이어질 때만 끊김으로 본다.
+    //   멈춤 중의 mute 는 셈하지 않는다 — 다시 재생할 때 아직 막혀 있으면 play() 가 이 재기를 다시 건다
+    tr.onmute = () => { clearTimeout(this.muteT); this.muteT = setTimeout(() => { if (this.micTrack === tr && tr.muted && this.state === 'playing') this.onMicLost('소리 막힘'); }, 1000); };
+    tr.onunmute = () => clearTimeout(this.muteT);
+  }
+
+  unwatchMic() {
+    clearTimeout(this.muteT);
+    const tr = this.micTrack;
+    this.micTrack = null;
+    if (tr) { tr.onended = tr.onmute = tr.onunmute = null; }
+  }
+
+  onMicLost(why) {
+    if (this.destroyed || this.state === 'done' || this.micLost) return;
+    console.warn('마이크가 끊김', why);
+    this.micLost = true;
+    this.micBroke = true;    // 이번 판에 한 번이라도 끊김(다시 열어도 남는다 — 결과 화면 까닭)
+    this.practiced = true;   // 이번 판은 녹음·최고 기록에 넣지 않는다
+    this.dropTake();
+    if (this.state === 'playing') this.pause();
+    toast('마이크가 끊겼어요 — 계속을 누르면 다시 엽니다', 4000);
+  }
+
+  micDead() {
+    if (this.opts.fakeMic || !this.micOk) return false;
+    if (this.micLost) return true;
+    const s = this.recStream;
+    return !s || !s.getAudioTracks().some((t) => t.readyState === 'live');
+  }
+
+  // 마이크가 끊겼으면 다시 연다. 못 열면 점수 없이 이어 간다
+  async reopenMic() {
+    if (!this.micDead()) return;
+    this.showOverlay(el('div', { class: 'card' }, el('p', {}, '마이크 다시 여는 중…')));
+    try {
+      const stream = await getMic(settings().echoCancel, settings().micId);
+      if (this.destroyed) { dropStream(stream); return; }
+      this.useMic(stream);
+      this.micLost = false;
+      toast('마이크를 다시 열었어요');
+    } catch (e) {
+      if (this.destroyed) return;
+      console.warn('마이크 다시 열기 실패', e);
+      this.micOk = false;
+      this.micLost = false;
+      this.unwatchMic();
+      this.recStream = null;   // 끝난 줄기로 '처음부터' 의 새 녹음기를 만들지 않게(11-22 검토)
+      toast('마이크를 다시 못 열어 점수 없이 이어 갑니다');
+    }
+    this.showOverlay(null);
+  }
+
+  // 멈춤에서 이어 부르기('계속'·재생 단추): 소리 장치는 누른 그 순간에 깨우고(iOS), 마이크가 끊겼으면 다시 연 뒤 재생
+  async cont() {
+    this.wakeCtx();
+    this.showOverlay(null);
+    if (this.micDead()) {
+      await this.reopenMic();
+      if (this.destroyed || this.state !== 'paused') return;
+    }
+    this.play(this.offsetMs);
+  }
+
+  wakeCtx() {
+    if (this.ctx.state === 'running') return;
+    try {
+      const p = this.ctx.resume();
+      if (p && p.catch) p.catch((e) => console.warn('소리 장치 깨우기 실패', e));
+    } catch (e) { console.warn('소리 장치 깨우기 실패', e); }
   }
 
   // ---------- 내 노래 녹음 ----------
@@ -328,6 +437,11 @@ export class Session {
   heard() { return this.pos() - this.outLat(); }
 
   play(fromMs) {
+    if (this.destroyed) return;
+    // ★ 11-22 감사: 멈춤 뒤 '계속' 에서도 소리 장치를 깨운다(iOS — 전화·잠금 뒤 'suspended'/'interrupted' 로 남으면 시각이 멈춘다).
+    //   누른 그 순간(기다리지 않고) 불러야 iOS 가 받아 준다. 멈춘 동안에도 currentTime 은 멈춘 값에서 이어 간다
+    this.wakeCtx();
+    this.playAt = performance.now();
     this.stopSources();
     clearTimeout(this.fadeT);
     this.music.gain.cancelScheduledValues(0);
@@ -352,6 +466,8 @@ export class Session {
       this.voiceSrc.start(when, fromMs / 1000);
       if (settings().guideVoice > 0) this.usedVoice = true;
     }
+    // 가이드 음(악보 음 그대로의 삼각파)도 가이드 목소리처럼 최고 기록에서 뺀다 — 스피커로 들으면 마이크가 그 음을 그대로 잡는다(11-22 감사)
+    if (settings().guide) this.usedGuide = true;
     if (this.take && this.take.rec.state === 'paused') {
       const t = this.take;
       this.takeT = setTimeout(() => { try { if (t.rec.state === 'paused') t.rec.resume(); } catch (e) { console.warn('녹음 잇기 실패', e); } }, 60);
@@ -363,6 +479,7 @@ export class Session {
     this.state = 'playing';
     this.playBtn.innerHTML = ICON.pause;
     this.lockScreen(true);
+    if (this.micTrack && this.micTrack.muted && this.micTrack.onmute) this.micTrack.onmute();
   }
 
   stopSources() {
@@ -386,14 +503,14 @@ export class Session {
 
   toggle() {
     if (this.state === 'playing') this.pause();
-    else if (this.state === 'paused') { this.showOverlay(null); this.play(this.offsetMs); }
+    else if (this.state === 'paused') this.cont();
     else if (this.state === 'ready') this.begin();
   }
 
   showPause() {
     this.showOverlay(el('div', { class: 'card' },
       el('h2', {}, '멈춤'),
-      el('button', { class: 'primary', onclick: () => { this.showOverlay(null); this.play(this.offsetMs); } }, '계속'),
+      el('button', { class: 'primary', onclick: () => this.cont() }, '계속'),
       el('button', { class: 'secondary', onclick: () => this.restart() }, '처음부터'),
       el('button', { class: 'secondary', onclick: () => this.quit() }, '목록으로'),
     ));
@@ -405,11 +522,20 @@ export class Session {
     else this.quit();
   }
 
-  restart() {
+  async restart() {
     if (this.opts.calib) { this.calibAgain(); return; }
+    this.wakeCtx();
     this.closeTake();
     this.dropTake();
+    if (this.micDead()) {
+      // 마이크가 끊긴 채면 다시 연 뒤 새 판으로(새 판은 녹음·최고 기록에 넣는다)
+      this.state = 'paused';
+      await this.reopenMic();
+      if (this.destroyed) return;
+    }
     this.usedVoice = false;
+    this.usedGuide = false;
+    this.micBroke = false;
     for (const n of this.song.notes) { n.hit = 0; n.segs = []; n.sung = []; }
     this.lineScores.fill(null);
     this.skipped.clear();
@@ -506,7 +632,7 @@ export class Session {
     }
     const tone = el('input', { type: 'checkbox', checked: s.guide, onchange: (e) => this.toggleGuide(e.target.checked) });
     items.push(el('label', { class: 'toggle' }, tone, el('span', {}, '가이드 음 (악보 음을 삐 소리로)')));
-    if (this.vocals) items.push(el('p', { class: 'hint' }, '가이드 목소리를 켜고 부른 판은 최고 기록에 넣지 않아요'));
+    items.push(el('p', { class: 'hint' }, this.vocals ? '가이드 목소리·가이드 음을 켜고 부른 판은 최고 기록에 넣지 않아요' : '가이드 음을 켜고 부른 판은 최고 기록에 넣지 않아요'));
     return items;
   }
 
@@ -541,6 +667,7 @@ export class Session {
 
   toggleGuide(on = !settings().guide) {
     saveSettings({ guide: on });
+    if (on && this.state === 'playing') this.usedGuide = true;
     this.showGuideOn();
     if (!on) { for (const o of this.guideNodes) { try { o.stop(); } catch { /* 이미 멈춤 */ } } this.guideNodes = []; }
     else this.guideUntil = this.pos();
@@ -561,16 +688,26 @@ export class Session {
     }
   }
 
+  // 화면 켜짐 유지. ★ 11-22 감사: 요청을 기다리는 사이 또 켜거나(진행 막대 누름·뗌) 끄면(멈춤·끝) 잠금 하나가 풀리지 않고 남았다 →
+  //   바라는 상태(wantWake)를 따로 두고, 요청이 끝나면 '지금도 켜야 하나' 를 다시 본다. 요청은 한 번에 하나만
   async lockScreen(on) {
+    this.wantWake = !!on && !this.destroyed;
     try {
-      if (on && !this.wake && navigator.wakeLock) {
+      if (this.wantWake && !this.wake && !this.wakeP && navigator.wakeLock) {
+        this.wakeP = navigator.wakeLock.request('screen');
+        let w;
+        try { w = await this.wakeP; } finally { this.wakeP = null; }
+        // 그 사이 멈춤·끝·화면 떠남이면 바로 푼다
+        if (!this.wantWake || this.wake) { await w.release(); return; }
         // 다른 앱에 다녀오면 브라우저가 스스로 풀어 버린다 → 풀리면 비워 두어 다음 재생에서 다시 잡게(11-14 점검)
-        const w = await navigator.wakeLock.request('screen');
         w.addEventListener('release', () => { if (this.wake === w) this.wake = null; });
         this.wake = w;
+      } else if (!this.wantWake && this.wake) {
+        const w = this.wake;
+        this.wake = null;   // 먼저 비운다 — 푸는 사이 다시 재생하면 새로 잡게
+        await w.release();
       }
-      if (!on && this.wake) { await this.wake.release(); this.wake = null; }
-    } catch { /* 화면 켜짐 유지를 못 해도 노래는 된다 */ }
+    } catch (e) { console.warn('화면 켜짐 유지 실패(노래는 그대로)', e); }
   }
 
   // ---------- 매 화면 ----------
@@ -583,12 +720,24 @@ export class Session {
       if (now - this.lastDetect >= 16) { this.lastDetect = now; this.detect(); }
       if (settings().guide) this.scheduleGuide();
       const t = this.heard();
-      if (this.loopLine >= 0) {
-        const l = this.song.lines[this.loopLine];
-        if (t > l.end + 600) this.seek(l.start - 1500);
+      const l = this.loopLine >= 0 ? this.song.lines[this.loopLine] : null;
+      if (l && t > l.end + 600) {
+        // ★ 11-22 감사: 되돌린 이 화면에서는 매기지 않는다. 전에는 옛 t 로 rateLines 를 불러, seek 가 방금 지운(0점) 반복 줄을
+        //   그 자리에서 매겨 버렸다 → 둘째 판부터 '완벽!' 등이 안 뜨고 결과 막대가 0% 로 굳었다.
+        //   결과 막대에는 마지막 판 점수가 남게 seek 전 값을 되돌려 둔다(다음 판이 l.end+150 에서 새로 매긴다)
+        const keep = this.lineScores[l.index];
+        this.seek(l.start - 1500);
+        if (keep != null) this.lineScores[l.index] = keep;
+      } else {
+        this.rateLines(t);
+        if (t >= this.endMs) this.finish();
       }
-      this.rateLines(t);
-      if (t >= this.endMs) this.finish();
+      // 안전망: 소리 장치가 'running' 이 아닌 채 1.5초 넘게 '재생 중' 이면(깨우기가 안 먹음) 멈춤 창으로 — 화면이 언 듯 남지 않게
+      if (this.state === 'playing' && this.ctx.state !== 'running' && now - (this.playAt || now) > 1500) {
+        console.warn('소리 장치가 안 깨어남', this.ctx.state);
+        this.pause();
+        toast('소리 장치가 멈춰 있어요 — 계속을 눌러 주세요');
+      }
     }
     this.draw(dt);
     this.drawLyrics();
@@ -989,15 +1138,27 @@ export class Session {
     this.lockScreen(false);
     this.playBtn.innerHTML = ICON.play;
     const sc = this.score();
-    const saved = this.micOk && !this.practiced && !this.usedVoice;
-    const isBest = saved && sc > (this.meta.best || 0);
+    // 마이크 줄기가 끝까지 살아 있었나(끊겼으면 녹음기가 스스로 멈춰 반쯤 빈 녹음이 남는다 — 11-22 감사)
+    const recAlive = (t) => t.rec.state !== 'inactive' && (!this.recStream || this.recStream.getAudioTracks().every((x) => x.readyState === 'live'));
     const take = this.take;
+    const takeOk = !!take && recAlive(take) && !this.micBroke;
+    const saved = this.micOk && !this.practiced && !this.usedVoice && !this.usedGuide && !this.micBroke && (!take || takeOk);
+    const isBest = saved && sc > (this.meta.best || 0);
+    // 결과 화면에 보일 '최고 기록에 안 넣은 까닭'
+    this.notSavedWhy = saved ? '' : (this.micBroke || (take && !takeOk)) ? '마이크가 끊겨서 최고 기록·녹음에는 넣지 않았어요'
+      : this.practiced ? '줄 반복·옮기기를 써서 최고 기록에는 넣지 않았어요'
+      : this.usedVoice && this.usedGuide ? '가이드 목소리·가이드 음을 켜고 불러서 최고 기록에는 넣지 않았어요'
+      : this.usedVoice ? '가이드 목소리를 켜고 불러서 최고 기록에는 넣지 않았어요'
+      : this.usedGuide ? '가이드 음을 켜고 불러서 최고 기록에는 넣지 않았어요' : '';
     this.take = null;
     clearTimeout(this.takeT);
     if (take) {
       try {
         const blob = await this.stopTake(take);
-        if (!this.practiced && blob.size > 0 && !this.destroyed) {
+        if (!takeOk) {
+          console.warn('마이크가 끊겨 이번 녹음은 저장하지 않음', { rec: take.rec.state, micBroke: !!this.micBroke });
+          if (!this.practiced && !this.destroyed) toast('마이크가 끊겨 이번 녹음은 저장하지 않았어요');
+        } else if (!this.practiced && blob.size > 0 && !this.destroyed) {
           await putBlob(this.meta.id + ':take', blob);
           this.meta.take = { offsetMs: Math.round(take.offsetMs), mime: take.mime, at: Date.now(), score: sc, adjust: 0 };
         }
@@ -1085,7 +1246,7 @@ export class Session {
       el('p', { class: 'muted' }, this.meta.title),
       el('div', { class: 'big-score' }, this.micOk ? sc.toLocaleString() : '—', el('small', {}, this.micOk ? '점' : '')),
       el('p', { class: 'word' }, word, isBest ? el('span', { class: 'badge' }, '최고 기록') : null),
-      !saved && this.micOk ? el('p', { class: 'hint' }, this.usedVoice && !this.practiced ? '가이드 목소리를 켜고 불러서 최고 기록에는 넣지 않았어요' : '줄 반복·옮기기를 써서 최고 기록에는 넣지 않았어요') : null,
+      !saved && this.micOk && this.notSavedWhy ? el('p', { class: 'hint' }, this.notSavedWhy) : null,
       nSkip && this.micOk ? el('p', { class: 'hint' }, `건너뛴 ${nSkip}줄은 회색 · 부른 줄만 보면 ${Math.round(sungPct * 100)}%`) : null,
       this.micOk ? this.rangeLine() : null,
       bars,
@@ -1113,7 +1274,7 @@ export class Session {
     this.loopBtn.classList.add('on');
     this.state = 'paused';
     this.seek(this.song.lines[i].start - 1500);
-    this.play(this.offsetMs);
+    this.cont();   // 소리 장치 깨우기·끊긴 마이크 다시 열기 뒤 재생
   }
 
   quit() {
@@ -1130,6 +1291,8 @@ export class Session {
     this.dropTake();
     this.stopSources();
     this.lockScreen(false);
+    this.unwatchMic();
+    try { this.ctx.removeEventListener('statechange', this.onCtxState); } catch (e) { console.warn('소리 장치 듣기 떼기 실패', e); }
     try { this.recDest?.disconnect(); } catch { /* 무시 */ }
     try { this.micNode?.disconnect(); } catch { /* 무시 */ }
     try { this.music.disconnect(); this.guideGain.disconnect(); this.voiceGain.disconnect(); this.analyser.disconnect(); } catch { /* 무시 */ }

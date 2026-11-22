@@ -14,9 +14,13 @@ export function parseUltraStar(text) {
   const breaks = [];   // beat 위치 (줄 바뀜)
   let player = 1;
   let relOffset = 0;
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  // 줄바꿈: 윈도우(\r\n)·유닉스(\n)·옛 Mac(\r 만) 모두 (11-22 감사)
+  const lines = text.replace(/^﻿/, '').split(/\r\n|\r|\n/);
+  let skippedLines = 0;  // 음 줄처럼 생겼는데 못 읽은 줄 수 — 넣기 결과에 보인다(조용히 음이 빠지지 않게)
 
-  for (const raw of lines) {
+  for (const line of lines) {
+    // 줄 앞 공백은 떼고 본다(손으로 고친 txt). 글자 뒤 공백은 그대로(글자 사이 띄어쓰기)
+    const raw = line.replace(/^[ \t]+/, '');
     if (!raw) continue;
     const c = raw[0];
     if (c === '#') {
@@ -39,13 +43,15 @@ export function parseUltraStar(text) {
     }
     const type = NOTE_TYPES[c];
     if (!type) continue;
-    // ": 박 길이 음높이 글자" — 글자는 공백을 포함할 수 있으니 앞 세 숫자만 잘라낸다
-    const m = raw.match(/^.\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)(?:\s(.*))?$/);
-    if (!m) continue;
+    // ": 박 길이 음높이 글자" — 글자는 공백을 포함할 수 있으니 앞 세 숫자만 잘라낸다.
+    // 종류 글자 뒤 공백이 없어도(':5 4 0 가'), 박·길이에 소수점이 있어도(0.5 / 0,5) 읽는다 (11-22 감사)
+    const m = raw.match(/^.\s*(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)\s+(-?\d+)(?:\s(.*))?$/);
+    if (!m) { skippedLines++; continue; }
+    const len = num(m[2]);
     rawNotes.push({
       type,
-      beat: parseInt(m[1], 10) + relOffset,
-      len: Math.max(1, parseInt(m[2], 10)),
+      beat: num(m[1]) + relOffset,
+      len: len > 0 ? len : 1,
       pitch: parseInt(m[3], 10),
       text: m[4] ?? '',
     });
@@ -103,6 +109,7 @@ export function parseUltraStar(text) {
     title: meta.TITLE || '제목 없음',
     artist: meta.ARTIST || '',
     audio: meta.AUDIO || meta.MP3 || '',
+    mp3: meta.MP3 || '',         // #AUDIO 와 다를 때 물러날 이름(옛 판 UltraStar)
     vocals: meta.VOCALS || '',   // 가이드 목소리(목소리만 든 소리, 11-13)
     cover: meta.COVER || '',
     bpm,
@@ -111,6 +118,7 @@ export function parseUltraStar(text) {
     endMs: endMs > 0 ? endMs : 0,
     lines: songLines,
     notes: songLines.flatMap((l) => l.notes),
+    skippedLines,                // 못 읽은 음 줄 수(0 이 정상)
   };
 }
 

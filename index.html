@@ -28,6 +28,18 @@ setTimeout(function () {
     try { caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }).then(done, done); } catch (e) { done(); }
   };
 }, 10000);
+// 새 판을 뒤에서 다 받았으면(sw.js 가 알림 — 11-22) 잠깐 알린다. 지금 화면은 그대로 두고 다음에 열 때 바뀐다.
+try {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', function (ev) {
+    if (!ev.data || ev.data.type !== 'norae-new-version') return;
+    var t = document.getElementById('toast');
+    if (!t) { t = document.createElement('div'); t.id = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
+    t.textContent = '새 판을 받았습니다 — 앱을 다시 열면 바뀝니다';
+    t.classList.add('show');
+    clearTimeout(t._h);
+    t._h = setTimeout(function () { t.classList.remove('show'); }, 5000);
+  });
+} catch (e) { console.warn('새 판 알림 받기 준비 실패', e); }
 </script>
 <script src="js/vendor/vexflow-bravura.js"></script>
 <script type="module" src="js/main.js"></script>

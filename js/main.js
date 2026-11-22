@@ -34,12 +34,21 @@ function go(hash) { location.hash = hash; }
 
 async function route() {
   if (cleanup) { try { cleanup(); } catch (e) { console.warn('화면 정리 실패', e); } cleanup = null; }
-  closeSheet();
-  app.className = '';
-  const h = location.hash.replace(/^#\/?/, '');
-  const [name, ...rest] = h.split('/');
-  const arg = decodeURIComponent(rest.join('/'));
+  let name = '';
   try {
+    closeSheet();
+    app.className = '';
+    const h = location.hash.replace(/^#\/?/, '');
+    const parts = h.split('/');
+    name = parts[0];
+    // 잘린 링크(#/play/%E0 등)는 decodeURIComponent 가 던진다 → 목록으로 (11-22 감사: 전에는 '여는 중…' 에 멈췄다)
+    let arg = '';
+    try { arg = decodeURIComponent(parts.slice(1).join('/')); } catch (e) {
+      console.warn('주소 해석 실패', h, e);
+      toast('주소가 잘못되어 목록으로 갑니다');
+      go('#/');
+      return;
+    }
     if (name === 'play' && arg) await showPlay(arg);
     else if (name === 'calib' && arg) await showPlay(arg, { calib: true });
     else if (name === 'take' && arg) await showTake(arg);
@@ -62,12 +71,19 @@ async function loadSong(id) {
   const meta = await getSong(id);
   if (!meta) throw new Error('곡이 없습니다');
   const song = parseUltraStar(meta.txt);
-  const stamp = meta.added + ':' + meta.audioName + ':' + (meta.vocalsName || '');
+  // updated: 다시 넣을 때마다 바뀐다 — 같은 이름의 새 소리로 다시 넣어도 옛 소리를 틀지 않게 (11-22 감사)
+  const stamp = (meta.updated || meta.added) + ':' + meta.audioName + ':' + (meta.vocalsName || '');
   if (decoded.id !== id || decoded.stamp !== stamp) {
     decoded = { id: null, stamp: 0, buffer: null, vocals: null };
     const blob = await getBlob(id + ':audio');
     if (!blob) throw new Error('곡의 소리 파일이 없습니다. 곡을 다시 넣어 주세요');
-    const buffer = await audioCtx().decodeAudioData(await blob.arrayBuffer());
+    let buffer;
+    try {
+      buffer = await audioCtx().decodeAudioData(await blob.arrayBuffer());
+    } catch (e) {
+      console.error('소리 파일 풀기 실패', meta.audioName, e);
+      throw new Error(`곡의 소리 파일(${meta.audioName})을 풀지 못했습니다. 파일이 깨졌을 수 있습니다 — 곡을 다시 넣어 주세요`);
+    }
     // 가이드 목소리 — 못 읽어도 노래는 된다(가이드 목소리만 없다)
     let vocals = null;
     if (meta.hasVocals) {
@@ -88,10 +104,16 @@ async function showPlay(id, extra = {}) {
   cleanup = () => { gone = true; };
   const { meta, song, buffer, vocals } = await loadSong(id);
   const opts = { vocals, ...extra };
-  if (params.get('fakedelay')) opts.fakeDelay = Number(params.get('fakedelay')) || 0;   // 시험용
+  // 시험용 꼬리는 ?test=1 일 때만, 가짜 마이크 파일은 이 앱과 같은 곳에서만 (11-22 감사: 남이 보낸 링크로 가짜 점수가 남지 않게)
+  if (TEST && params.get('fakedelay')) opts.fakeDelay = Number(params.get('fakedelay')) || 0;
+  let fakeUrl = null;
   if (params.get('fakemic')) {
+    try { const u = new URL(params.get('fakemic'), location.href); if (TEST && u.origin === location.origin) fakeUrl = u.href; } catch (e) { console.warn('fakemic 주소 해석 실패', e); }
+    if (!fakeUrl) console.warn('fakemic 꼬리를 무시함 (?test=1 이 아니거나 다른 곳 주소)');
+  }
+  if (fakeUrl) {
     // 시험용: 마이크 대신 목소리 파일을 흘린다
-    const r = await fetch(params.get('fakemic'));
+    const r = await fetch(fakeUrl);
     if (!r.ok) throw new Error('시험 목소리 파일을 못 읽음 ' + r.status);
     opts.fakeMic = await audioCtx().decodeAudioData(await r.arrayBuffer());
   }
@@ -171,7 +193,7 @@ async function showList() {
           el('li', {}, el('span', {}, '아래 ', el('b', {}, '곡 넣기'), ' 에서 그 zip 을 고르기')),
         ),
         el('button', { class: 'primary', onclick: pick }, '곡 넣기'),
-        el('p', { class: 'hint' }, '악보(.txt)와 노래(.mp3)를 함께 골라도 됩니다.'),
+        el('p', { class: 'hint' }, '악보(.txt)와 [반주…]·[목소리…] mp3 를 함께 골라도 됩니다(원곡 mp3 는 쓰지 않습니다).'),
       ));
       return;
     }
@@ -235,14 +257,18 @@ async function showList() {
       res = await importFiles(files, (t) => { line.textContent = t; });
     } catch (e) {
       console.error('곡 넣기 실패', e);
-      res = { added: [], failed: [{ name: '(전체)', why: e.message || String(e) }] };
+      res = { added: [], warned: [], failed: [{ name: '(전체)', why: e.message || String(e) }] };
     }
-    songs = await allSongs();
+    // 다시 넣은 곡의 풀어 둔 소리를 버린다(같은 이름의 새 소리로 다시 넣어도 새 소리를 틀게, 11-22 감사)
+    decoded = { id: null, stamp: 0, buffer: null, vocals: null };
+    const warned = res.warned || [];
+    try { songs = await allSongs(); } catch (e) { console.error('목록 다시 읽기 실패', e); }
     draw();
     // replaceChildren 은 null 을 글자 "null" 로 넣는다 → 빈 칸은 걸러 낸다 (11-13 화면 검토)
     box.replaceChildren(...[
       el('h2', {}, res.added.length ? `${res.added.length}곡 넣었습니다` : '넣은 곡이 없습니다'),
       res.added.length ? el('p', { class: 'muted' }, res.added.slice(0, 6).join(', ') + (res.added.length > 6 ? ` 외 ${res.added.length - 6}곡` : '')) : null,
+      warned.length ? el('div', { class: 'fails' }, el('b', {}, `넣었지만 알아 둘 것 ${warned.length}개`), el('ul', {}, warned.slice(0, 30).map((f) => el('li', {}, `${f.name} — ${f.why}`)))) : null,
       res.failed.length ? el('div', { class: 'fails' }, el('b', {}, `못 넣은 것 ${res.failed.length}개`), el('ul', {}, res.failed.slice(0, 30).map((f) => el('li', {}, `${f.name} — ${f.why}`)))) : null,
       el('button', { class: 'primary', onclick: () => ov.remove() }, '확인'),
     ].filter(Boolean));
